@@ -1,0 +1,12 @@
+*{box-sizing:border-box}
+body{margin:0;font-family:var(--font-body);color:var(--text-body);background:var(--surface-page);-webkit-font-smoothing:antialiased}
+h1,h2,h3,h4{font-family:var(--font-display);margin:0;letter-spacing:var(--tracking-tight)}
+p{margin:0}
+a{color:var(--color-primary);text-decoration:none}
+a:hover{color:var(--color-primary-hover);text-decoration:underline}
+button{font-family:inherit}
+table{border-collapse:collapse}
+::selection{background:var(--color-primary-subtle);color:var(--color-primary-dark)}
+:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+
+@keyframes vr-pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.7);opacity:.35}}
