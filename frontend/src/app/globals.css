@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
@@ -126,5 +127,115 @@
   }
   html {
     @apply font-sans;
+  }
+}
+
+:root {
+  --color-primary: #00AAEA;
+  --color-primary-hover: #0092CB;
+  --color-primary-active: #0079A8;
+  --color-primary-subtle: #E3F6FD;
+  --color-primary-dark: #285180;
+  --color-primary-dark-hover: #1F3F64;
+  --color-primary-dark-subtle: #E7ECF3;
+  --color-success: #00A150;
+  --color-success-hover: #008943;
+  --color-success-subtle: #E2F6EC;
+  --color-danger: #DC1C34;
+  --color-danger-hover: #BC162B;
+  --color-danger-subtle: #FCE8EA;
+  --color-warning: #E2A100;
+  --color-warning-hover: #C48B00;
+  --color-warning-subtle: #FBF1DA;
+  --color-surface: #EDEDED;
+  --color-background: #F7F9FB;
+  --color-white: #FFFFFF;
+  --color-text-primary: #17212B;
+  --color-text-secondary: #657381;
+  --neutral-0: #FFFFFF;
+  --neutral-50: #F7F9FB;
+  --neutral-100: #EDEDED;
+  --neutral-150: #E2E5E8;
+  --neutral-200: #D5DADF;
+  --neutral-300: #BFC7CD;
+  --neutral-400: #98A2AB;
+  --neutral-500: #657381;
+  --neutral-600: #4F5C68;
+  --neutral-700: #3A4550;
+  --neutral-800: #262E36;
+  --neutral-900: #17212B;
+  --surface-card: var(--color-white);
+  --surface-page: var(--color-background);
+  --surface-muted: var(--color-surface);
+  --border-default: var(--neutral-200);
+  --border-strong: var(--neutral-300);
+  --text-body: var(--color-text-primary);
+  --text-muted: var(--color-text-secondary);
+  --text-on-primary: var(--color-white);
+  --text-on-dark: var(--color-white);
+  --focus-ring: var(--color-primary);
+  --font-display: 'Outfit',system-ui,sans-serif;
+  --font-body: 'Manrope',system-ui,sans-serif;
+  --font-mono: 'JetBrains Mono',ui-monospace,monospace;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-md: 16px;
+  --text-lg: 18px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+  --text-3xl: 28px;
+  --text-4xl: 34px;
+  --text-5xl: 44px;
+  --leading-tight: 1.15;
+  --leading-snug: 1.35;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  --tracking-tight: -0.01em;
+  --tracking-normal: 0em;
+  --tracking-wide: 0.02em;
+  --tracking-wider: 0.06em;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+  --container-max: 1360px;
+  --panel-min: 320px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-full: 999px;
+  --shadow-xs: 0 1px 2px rgba(23,33,43,0.06);
+  --shadow-sm: 0 2px 6px rgba(23,33,43,0.07);
+  --shadow-md: 0 6px 20px rgba(23,33,43,0.09);
+  --shadow-lg: 0 16px 40px rgba(23,33,43,0.14);
+  --shadow-focus: 0 0 0 3px rgba(0,170,234,0.28);
+  --ease-standard: cubic-bezier(.2,.8,.2,1);
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --duration-slow: 280ms;
+  --border-width: 1px;
+}
+
+@keyframes vr-pulse {
+  0%,100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.7);
+    opacity: 0.35;
   }
 }

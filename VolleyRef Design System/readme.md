@@ -1,5 +1,7 @@
 # VolleyRef Design System
 
+![status](https://img.shields.io/badge/status-prototype-00AAEA) ![components](https://img.shields.io/badge/components-16-285180) ![language](https://img.shields.io/badge/lingua-italiano-00A150) ![fipav logo](https://img.shields.io/badge/logo%20ufficiale%20FIPAV-non%20usato-DC1C34)
+
 VolleyRef is a from-scratch product concept: a web app that turns a paper/PDF volleyball match report ("referto") into structured, checkable data — starting six, rotations, service turns — ready for export to Excel. This project is both the brand's design system (tokens, components) and a fully clickable frontend prototype of the product, built with mock data (no backend, no real PDF parsing yet).
 
 **Sources provided:** a brief (product spec, in `Additional notes` of the design request) and one uploaded reference file, `uploads/logo-fipav.png` (the official FIPAV — Federazione Italiana Pallavolo — logo, provided only as color/context reference). No Figma file or codebase was attached; everything here was built from scratch to the brief's exact spec.
