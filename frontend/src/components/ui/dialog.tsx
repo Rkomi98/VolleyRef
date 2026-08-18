@@ -7,7 +7,14 @@ import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { XIcon } from "lucide-react"
 
-function Dialog({ ...props }: DialogPrimitive.Root.Props) {
+// Low-level Base UI building blocks (the root primitive is renamed
+// `DialogRoot` — instead of the generic shadcn `Dialog` — so the
+// design-system-facing `Dialog` component below, matching
+// `overlay/Dialog.jsx`'s `{ open, onClose, title, description, footer,
+// size }` API, can own the plain `Dialog` name). Kept exported for call
+// sites that want the full shadcn trigger/close/header/footer building
+// blocks instead.
+function DialogRoot({ ...props }: DialogPrimitive.Root.Props) {
   return <DialogPrimitive.Root data-slot="dialog" {...props} />
 }
 
@@ -23,10 +30,7 @@ function DialogClose({ ...props }: DialogPrimitive.Close.Props) {
   return <DialogPrimitive.Close data-slot="dialog-close" {...props} />
 }
 
-function DialogOverlay({
-  className,
-  ...props
-}: DialogPrimitive.Backdrop.Props) {
+function DialogOverlay({ className, ...props }: DialogPrimitive.Backdrop.Props) {
   return (
     <DialogPrimitive.Backdrop
       data-slot="dialog-overlay"
@@ -65,13 +69,12 @@ function DialogContent({
             render={
               <Button
                 variant="ghost"
-                className="absolute top-2 right-2"
-                size="icon-sm"
+                size="sm"
+                className="absolute top-2 right-2 !h-7 !w-7 !p-0"
               />
             }
           >
-            <XIcon
-            />
+            <XIcon size={16} />
             <span className="sr-only">Close</span>
           </DialogPrimitive.Close>
         )}
@@ -81,13 +84,7 @@ function DialogContent({
 }
 
 function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
-  return (
-    <div
-      data-slot="dialog-header"
-      className={cn("flex flex-col gap-2", className)}
-      {...props}
-    />
-  )
+  return <div data-slot="dialog-header" className={cn("flex flex-col gap-2", className)} {...props} />
 }
 
 function DialogFooter({
@@ -109,9 +106,7 @@ function DialogFooter({
     >
       {children}
       {showCloseButton && (
-        <DialogPrimitive.Close render={<Button variant="outline" />}>
-          Close
-        </DialogPrimitive.Close>
+        <DialogPrimitive.Close render={<Button variant="secondary" />}>Close</DialogPrimitive.Close>
       )}
     </div>
   )
@@ -121,19 +116,13 @@ function DialogTitle({ className, ...props }: DialogPrimitive.Title.Props) {
   return (
     <DialogPrimitive.Title
       data-slot="dialog-title"
-      className={cn(
-        "font-heading text-base leading-none font-medium",
-        className
-      )}
+      className={cn("font-heading text-base leading-none font-medium", className)}
       {...props}
     />
   )
 }
 
-function DialogDescription({
-  className,
-  ...props
-}: DialogPrimitive.Description.Props) {
+function DialogDescription({ className, ...props }: DialogPrimitive.Description.Props) {
   return (
     <DialogPrimitive.Description
       data-slot="dialog-description"
@@ -146,8 +135,100 @@ function DialogDescription({
   )
 }
 
+export interface DialogProps {
+  open: boolean
+  onClose?: () => void
+  title: string
+  description?: string
+  children?: React.ReactNode
+  footer?: React.ReactNode
+  size?: "sm" | "md" | "lg"
+}
+
+const dialogWidths: Record<"sm" | "md" | "lg", number> = { sm: 400, md: 520, lg: 680 }
+
+/**
+ * VolleyRef's modal shell — the design-system-facing API ported from
+ * `overlay/Dialog.jsx`. It's built on `DialogRoot`/`DialogPrimitive.Popup`
+ * above instead of the prototype's hand-rolled `<div role="dialog">`, so it
+ * gets a real focus trap, a portal, scroll locking, and Escape/outside-press
+ * dismissal from Base UI rather than a manual `keydown` listener and
+ * `onClick`/`stopPropagation` pair. No close (×) button is rendered by
+ * default — same as the original, which relies on Escape, backdrop click,
+ * or the caller's own footer actions.
+ */
+export function Dialog({ open, onClose, title, description, children, footer, size = "md" }: DialogProps) {
+  return (
+    <DialogRoot
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onClose?.()
+      }}
+    >
+      <DialogPortal>
+        <DialogPrimitive.Backdrop
+          data-slot="dialog-overlay"
+          style={{ position: "fixed", inset: 0, background: "rgba(23,33,43,0.45)", zIndex: 100 }}
+        />
+        <DialogPrimitive.Popup
+          aria-label={title}
+          style={{
+            position: "fixed",
+            top: "50%",
+            left: "50%",
+            transform: "translate(-50%, -50%)",
+            width: `min(calc(100% - 40px), ${dialogWidths[size] || dialogWidths.md}px)`,
+            background: "var(--color-white)",
+            borderRadius: "var(--radius-lg)",
+            boxShadow: "var(--shadow-lg)",
+            maxHeight: "86vh",
+            display: "flex",
+            flexDirection: "column",
+            zIndex: 100,
+            outline: "none",
+          }}
+        >
+          <div style={{ padding: "20px 24px", borderBottom: "1px solid var(--border-default)" }}>
+            <DialogPrimitive.Title
+              style={{
+                fontSize: "var(--text-xl)",
+                fontFamily: "var(--font-display)",
+                color: "var(--color-text-primary)",
+                margin: 0,
+              }}
+            >
+              {title}
+            </DialogPrimitive.Title>
+            {description && (
+              <DialogPrimitive.Description
+                style={{ marginTop: 6, fontSize: "var(--text-sm)", color: "var(--color-text-secondary)" }}
+              >
+                {description}
+              </DialogPrimitive.Description>
+            )}
+          </div>
+          <div style={{ padding: "20px 24px", overflowY: "auto" }}>{children}</div>
+          {footer && (
+            <div
+              style={{
+                padding: "16px 24px",
+                borderTop: "1px solid var(--border-default)",
+                display: "flex",
+                justifyContent: "flex-end",
+                gap: 10,
+              }}
+            >
+              {footer}
+            </div>
+          )}
+        </DialogPrimitive.Popup>
+      </DialogPortal>
+    </DialogRoot>
+  )
+}
+
 export {
-  Dialog,
+  DialogRoot,
   DialogClose,
   DialogContent,
   DialogDescription,

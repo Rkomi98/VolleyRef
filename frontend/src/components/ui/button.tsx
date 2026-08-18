@@ -1,58 +1,134 @@
-import { Button as ButtonPrimitive } from "@base-ui/react/button"
-import { cva, type VariantProps } from "class-variance-authority"
+"use client"
 
-import { cn } from "@/lib/utils"
+import * as React from "react"
 
-const buttonVariants = cva(
-  "group/button inline-flex shrink-0 items-center justify-center rounded-lg border border-transparent bg-clip-padding text-sm font-medium whitespace-nowrap transition-all outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
-  {
-    variants: {
-      variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/80",
-        outline:
-          "border-border bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
-        secondary:
-          "bg-secondary text-secondary-foreground hover:bg-[color-mix(in_oklch,var(--secondary),var(--foreground)_5%)] aria-expanded:bg-secondary aria-expanded:text-secondary-foreground",
-        ghost:
-          "hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:hover:bg-muted/50",
-        destructive:
-          "bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40",
-        link: "text-primary underline-offset-4 hover:underline",
-      },
-      size: {
-        default:
-          "h-8 gap-1.5 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2",
-        xs: "h-6 gap-1 rounded-[min(var(--radius-md),10px)] px-2 text-xs in-data-[slot=button-group]:rounded-lg has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 [&_svg:not([class*='size-'])]:size-3",
-        sm: "h-7 gap-1 rounded-[min(var(--radius-md),12px)] px-2.5 text-[0.8rem] in-data-[slot=button-group]:rounded-lg has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 [&_svg:not([class*='size-'])]:size-3.5",
-        lg: "h-9 gap-1.5 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2",
-        icon: "size-8",
-        "icon-xs":
-          "size-6 rounded-[min(var(--radius-md),10px)] in-data-[slot=button-group]:rounded-lg [&_svg:not([class*='size-'])]:size-3",
-        "icon-sm":
-          "size-7 rounded-[min(var(--radius-md),12px)] in-data-[slot=button-group]:rounded-lg",
-        "icon-lg": "size-9",
-      },
-    },
-    defaultVariants: {
-      variant: "default",
-      size: "default",
-    },
-  }
-)
-
-function Button({
-  className,
-  variant = "default",
-  size = "default",
-  ...props
-}: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
-  return (
-    <ButtonPrimitive
-      data-slot="button"
-      className={cn(buttonVariants({ variant, size, className }))}
-      {...props}
-    />
-  )
+export interface ButtonProps
+  extends Omit<
+    React.ButtonHTMLAttributes<HTMLButtonElement>,
+    "type" | "disabled" | "onClick" | "style"
+  > {
+  children?: React.ReactNode
+  variant?: "primary" | "secondary" | "ghost" | "danger"
+  size?: "sm" | "md" | "lg"
+  icon?: React.ReactNode
+  iconPosition?: "left" | "right"
+  disabled?: boolean
+  loading?: boolean
+  type?: "button" | "submit"
+  onClick?: () => void
+  style?: React.CSSProperties
 }
 
-export { Button, buttonVariants }
+interface SizeSpec {
+  padding: string
+  fontSize: string
+  gap: number
+  height: number
+}
+
+const sizes: Record<"sm" | "md" | "lg", SizeSpec> = {
+  sm: { padding: "6px 12px", fontSize: "var(--text-sm)", gap: 6, height: 32 },
+  md: { padding: "9px 16px", fontSize: "var(--text-base)", gap: 8, height: 40 },
+  lg: { padding: "12px 20px", fontSize: "var(--text-md)", gap: 8, height: 48 },
+}
+
+interface PaletteSpec {
+  bg: string
+  bgHover: string
+  bgActive: string
+  fg: string
+  border: string
+}
+
+const palette: Record<"primary" | "secondary" | "ghost" | "danger", PaletteSpec> = {
+  primary: {
+    bg: "var(--color-primary)",
+    bgHover: "var(--color-primary-hover)",
+    bgActive: "var(--color-primary-active)",
+    fg: "var(--text-on-primary)",
+    border: "transparent",
+  },
+  secondary: {
+    bg: "var(--color-white)",
+    bgHover: "var(--neutral-50)",
+    bgActive: "var(--neutral-100)",
+    fg: "var(--color-primary-dark)",
+    border: "var(--border-default)",
+  },
+  ghost: {
+    bg: "transparent",
+    bgHover: "var(--neutral-100)",
+    bgActive: "var(--neutral-150)",
+    fg: "var(--color-text-primary)",
+    border: "transparent",
+  },
+  danger: {
+    bg: "var(--color-danger)",
+    bgHover: "var(--color-danger-hover)",
+    bgActive: "var(--color-danger-hover)",
+    fg: "var(--color-white)",
+    border: "transparent",
+  },
+}
+
+export function Button({
+  children,
+  variant = "primary",
+  size = "md",
+  icon = null,
+  iconPosition = "left",
+  disabled = false,
+  loading = false,
+  type = "button",
+  onClick,
+  style,
+  ...rest
+}: ButtonProps) {
+  const [hover, setHover] = React.useState(false)
+  const [active, setActive] = React.useState(false)
+
+  const p = palette[variant] || palette.primary
+  const s = sizes[size] || sizes.md
+  const bg = disabled ? "var(--neutral-150)" : active ? p.bgActive : hover ? p.bgHover : p.bg
+  const fg = disabled ? "var(--neutral-400)" : p.fg
+
+  return (
+    <button
+      type={type}
+      disabled={disabled || loading}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => {
+        setHover(false)
+        setActive(false)
+      }}
+      onMouseDown={() => setActive(true)}
+      onMouseUp={() => setActive(false)}
+      onClick={onClick}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: s.gap,
+        padding: s.padding,
+        height: s.height,
+        fontSize: s.fontSize,
+        fontFamily: "var(--font-body)",
+        fontWeight: "var(--weight-semibold)",
+        color: fg,
+        background: bg,
+        border: `1px solid ${p.border === "transparent" ? "transparent" : disabled ? "var(--border-default)" : p.border}`,
+        borderRadius: "var(--radius-md)",
+        cursor: disabled ? "not-allowed" : "pointer",
+        transition: "background var(--duration-fast) var(--ease-standard), box-shadow var(--duration-fast)",
+        boxShadow: variant === "primary" && !disabled ? "var(--shadow-xs)" : "none",
+        whiteSpace: "nowrap",
+        ...style,
+      }}
+      {...rest}
+    >
+      {icon && iconPosition === "left" && <span style={{ display: "inline-flex" }}>{icon}</span>}
+      {loading ? "Attendere…" : children}
+      {icon && iconPosition === "right" && <span style={{ display: "inline-flex" }}>{icon}</span>}
+    </button>
+  )
+}

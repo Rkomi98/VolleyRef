@@ -1,11 +1,17 @@
 "use client"
 
+import * as React from "react"
 import { Tabs as TabsPrimitive } from "@base-ui/react/tabs"
 import { cva, type VariantProps } from "class-variance-authority"
 
 import { cn } from "@/lib/utils"
 
-function Tabs({
+// Low-level Base UI building blocks (renamed from the generic shadcn
+// `Tabs`/`TabsList`/`TabsTrigger`/`TabsContent` names so the design-system
+// `Tabs` component below — matching `data/Tabs.jsx`'s flat, panel-less API
+// — can own the plain names). Kept exported for call sites that need a full
+// tabs+panel widget with the default shadcn look.
+function TabsRoot({
   className,
   orientation = "horizontal",
   ...props
@@ -14,10 +20,7 @@ function Tabs({
     <TabsPrimitive.Root
       data-slot="tabs"
       data-orientation={orientation}
-      className={cn(
-        "group/tabs flex gap-2 data-horizontal:flex-col",
-        className
-      )}
+      className={cn("group/tabs flex gap-2 data-horizontal:flex-col", className)}
       {...props}
     />
   )
@@ -71,12 +74,75 @@ function TabsTrigger({ className, ...props }: TabsPrimitive.Tab.Props) {
 
 function TabsContent({ className, ...props }: TabsPrimitive.Panel.Props) {
   return (
-    <TabsPrimitive.Panel
-      data-slot="tabs-content"
-      className={cn("flex-1 text-sm outline-none", className)}
-      {...props}
-    />
+    <TabsPrimitive.Panel data-slot="tabs-content" className={cn("flex-1 text-sm outline-none", className)} {...props} />
   )
 }
 
-export { Tabs, TabsList, TabsTrigger, TabsContent, tabsListVariants }
+export interface TabItem {
+  value: string
+  label: string
+  icon?: React.ReactNode
+  disabled?: boolean
+}
+
+export interface TabsProps {
+  tabs: TabItem[]
+  value?: string
+  onChange?: (value: string) => void
+}
+
+/**
+ * VolleyRef's underlined tab bar — the design-system-facing API ported from
+ * `data/Tabs.jsx`. It's navigation-only (no panels), so it's built directly
+ * on `TabsRoot`/`TabsList`/`TabsTrigger` above for real roving-tabindex
+ * keyboard navigation and ARIA wiring, restyled with the prototype's
+ * underline look via the same CSS variables.
+ */
+export function Tabs({ tabs = [], value, onChange }: TabsProps) {
+  return (
+    <TabsRoot
+      value={value}
+      onValueChange={(v) => onChange && onChange(v as string)}
+      className="!flex-row !gap-0"
+    >
+      <TabsList
+        variant="line"
+        className="!h-auto !w-full !justify-start !gap-1 !bg-transparent !p-0"
+        style={{ borderBottom: "1px solid var(--border-default)" }}
+      >
+        {tabs.map((t) => {
+          const isActive = t.value === value
+          return (
+            <TabsTrigger
+              key={t.value}
+              value={t.value}
+              disabled={t.disabled}
+              className="!h-auto !flex-none !rounded-none !border-none !bg-transparent !shadow-none after:hidden"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "12px 6px",
+                marginBottom: -1,
+                borderBottom: `2px solid ${isActive ? "var(--color-primary)" : "transparent"}`,
+                color: t.disabled
+                  ? "var(--neutral-300)"
+                  : isActive
+                    ? "var(--color-primary-dark)"
+                    : "var(--color-text-secondary)",
+                fontFamily: "var(--font-body)",
+                fontWeight: "var(--weight-semibold)",
+                fontSize: "var(--text-base)",
+              }}
+            >
+              {t.icon}
+              {t.label}
+            </TabsTrigger>
+          )
+        })}
+      </TabsList>
+    </TabsRoot>
+  )
+}
+
+export { TabsRoot, TabsList, TabsTrigger, TabsContent, tabsListVariants }
