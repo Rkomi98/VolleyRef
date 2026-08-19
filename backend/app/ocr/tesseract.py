@@ -115,12 +115,15 @@ def _normalize(text: str, expected_type: Optional[ExpectedType]) -> str:
     """
 
     text = text.strip().replace("\n", " ")
-    text = re.sub(r"\s+", "", text)
     if expected_type is ExpectedType.PLAYER_NUMBER:
-        text = re.sub(r"\D", "", text)
-    elif expected_type is ExpectedType.SCORE:
-        text = re.sub(r"[^\d:\-]", "", text)
-    return text
+        return re.sub(r"\D", "", text)
+    if expected_type is ExpectedType.SCORE:
+        return re.sub(r"[^\d:\-]", "", text)
+    if expected_type is ExpectedType.ROTATION_LABEL:
+        return re.sub(r"[^IVX]", "", text.upper())
+    # Per i tipi testuali gli spazi separano i token e servono: si comprimono,
+    # non si eliminano (altrimenti "SQ. AZIMUT GIO" diventa inseparabile).
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def is_valid_player_number(value: str) -> bool:
@@ -150,11 +153,21 @@ class TesseractOcr:
         upscale: float = 3.0,
         border: int = 25,
         min_confidence: float = 0.0,
+        max_side: int = 2200,
+        cache_size: int = 4096,
     ) -> None:
         self.lang = lang
         self.upscale = upscale
         self.border = border
         self.min_confidence = min_confidence
+        self.max_side = max_side
+        # Il layout detector valuta finestre di colonne SOVRAPPOSTE per capire
+        # quali sono le sei della formazione, e la pipeline rilegge poi le celle
+        # scelte: la stessa cella arriva quindi a Tesseract più volte. La cache
+        # sul contenuto del ritaglio è trasparente (nessun risultato cambia) ed
+        # elimina il grosso del costo, che è dominato dai processi Tesseract.
+        self.cache_size = cache_size
+        self._cache: dict[tuple, OcrResult] = {}
 
     # ------------------------------------------------------------------ utils
 
@@ -186,10 +199,18 @@ class TesseractOcr:
         needs_binarize = profile.force_binarize or float(np.median(img)) < 200.0
         if needs_binarize:
             _, img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        if self.upscale and self.upscale != 1.0:
-            img = cv2.resize(
-                img, None, fx=self.upscale, fy=self.upscale, interpolation=cv2.INTER_CUBIC
-            )
+        # L'upscale serve alle celle piccole (una cifra di 30px diventa 90px).
+        # Su un ritaglio già grande — le sonde di etichetta che il layout
+        # detector usa per ancorarsi — è solo tempo di CPU buttato, e a 300dpi
+        # quelle strisce sono già oltre la dimensione ottimale per Tesseract:
+        # il fattore viene quindi limitato in modo che il lato lungo non superi
+        # `max_side`.
+        scale = self.upscale or 1.0
+        if self.max_side:
+            longest = max(img.shape[:2]) or 1
+            scale = min(scale, max(1.0, self.max_side / longest))
+        if scale > 1.0:
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         if self.border:
             img = cv2.copyMakeBorder(
                 img,
@@ -257,6 +278,13 @@ class TesseractOcr:
         if image is None or image.size == 0:
             return OcrResult(text="", confidence=0.0, candidates=[])
 
+        cache_key: Optional[tuple] = None
+        if self.cache_size:
+            cache_key = (expected_type, profile, image.shape, hash(image.tobytes()))
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                return cached
+
         prepared = self._preprocess(image, profile)
         readings: list[tuple[str, float, int]] = []
         for psm in profile.psms:
@@ -285,12 +313,17 @@ class TesseractOcr:
         candidates.sort(key=lambda c: (-c.confidence, c.value))
 
         best = candidates[0] if candidates else None
-        return OcrResult(
+        result = OcrResult(
             text=best.value if best else "",
             confidence=best.confidence if best else 0.0,
             candidates=candidates,
             debug={"readings": readings, "psms": list(profile.psms)},
         )
+        if cache_key is not None:
+            if len(self._cache) >= self.cache_size:
+                self._cache.clear()
+            self._cache[cache_key] = result
+        return result
 
     def read_many(
         self, images: Sequence[np.ndarray], expected_type: ExpectedType
