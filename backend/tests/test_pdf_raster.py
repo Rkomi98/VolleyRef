@@ -28,11 +28,18 @@ scritto il codice, non contro valori dati dal prompt):
   marcati `xfail(strict=False)`-like: il test li asserisce, ma il commento qui
   sopra è la loro unica garanzia di provenienza.
 
+VERIFICATO contro il testo stampato sul referto (leggibile nel render di debug
+`p1_render.png`, quindi controllabile a occhio da chiunque):
+
+- i **nomi squadra** letti dalla fascia "SQUADRE" dell'header pagina, per intero:
+  "ROTHOBLAAS VOLANO TN" e "AZIMUT GIORGIONE TV".
+
 APPROSSIMATIVO, dichiarato tale e non asserito come esatto:
 
-- i **nomi squadra**: il ritaglio è la cella della fascia titolo, che contiene
-  anche "SQ.", l'orario e i cerchietti A/B; il test verifica solo che il nome
-  compaia come sottostringa, non che il valore sia pulito;
+- i **nomi squadra letti dalle fasce titolo dei riquadri set**: là il modulo li
+  stampa abbreviati ("AZIMUT GIO") e il ritaglio contiene anche "SQ.", l'orario e
+  i cerchietti A/B; il test verifica solo che il nome compaia come sottostringa.
+  Restano letti perché servono come spareggio nell'assegnazione dei lati;
 - il **numero del set** letto dalla colonna grigia "SET": su questa fixture due
   riquadri leggono la stessa cifra, quindi la pipeline ripiega (correttamente e
   in modo tracciato in `meta`) sull'ordine di lettura dei riquadri;
@@ -214,6 +221,21 @@ def test_pipeline_produce_raw_observation_con_metodo_ocr(result) -> None:
         assert result.region_by_id(observation.region_id) is not None
 
 
+def test_nessuna_source_region_ha_id_duplicato(result) -> None:
+    """Invariante: una cella, un id — su referto REALE e con OCR reale.
+
+    Due `SourceRegion` con lo stesso id sono due letture di cui una sparisce
+    (nell'aggregazione a valle e nelle chiavi del frontend). Era il caso della
+    tabella "RISULTATO FINALE", il cui id di cella conteneva la cifra del set
+    letta via OCR invece della riga fisica: vedi
+    `tests/test_raster_score_ambiguity.py`.
+    """
+
+    ids = [region.id for region in result.regions]
+    duplicates = sorted({region_id for region_id in ids if ids.count(region_id) > 1})
+    assert not duplicates, f"SourceRegion con id duplicato: {duplicates}"
+
+
 def test_source_region_sono_normalizzate_e_marcate_ocr(result) -> None:
     """backend §9: coordinate [0,1] di pagina, metodo OCR, pagina 1-based."""
 
@@ -294,13 +316,15 @@ def test_sestetti_e_punteggi_degli_altri_set(result, set_number: int) -> None:
     assert (score.get("A"), score.get("B")) == expected_score
 
 
-def test_nomi_squadra_sono_approssimativi_ma_riconoscibili(result) -> None:
-    """Il nome squadra NON è estratto in modo pulito: si verifica solo che ci sia.
+def test_nomi_squadra_completi_dalla_fascia_squadre_dell_header(result) -> None:
+    """Il nome squadra si legge dalla fascia "SQUADRE", dove è stampato per intero.
 
-    Il ritaglio è la cella della fascia titolo, che contiene anche "SQ.",
-    l'orario e i cerchietti A/B: la pulizia è lessicale e può lasciare residui o
-    troncare l'ultima lettera. Il test è deliberatamente debole per non
-    dichiarare una precisione che non c'è.
+    Prima veniva letto solo dalle fasce titolo dei riquadri set, dove il software
+    di refertazione lo stampa ABBREVIATO ("AZIMUT GIO"): non era un problema di
+    OCR ma di fascia sbagliata, e nessun ritocco del ritaglio poteva rimediare.
+    La fascia "SQUADRE" dell'header è la stessa a cui si ancora il percorso text
+    layer (`app/extraction/text/header.py`), quindi i due percorsi ora leggono lo
+    stesso testo dallo stesso posto.
     """
 
     names = {
@@ -308,6 +332,25 @@ def test_nomi_squadra_sono_approssimativi_ma_riconoscibili(result) -> None:
         for observation in result.observations_of(ExpectedType.TEAM_NAME)
     }
     assert names, "nessun nome squadra estratto"
+    assert names.get("p1-match_header-team-a") == "ROTHOBLAAS VOLANO TN"
+    assert names.get("p1-match_header-team-b") == "AZIMUT GIORGIONE TV"
+
+
+def test_nomi_squadra_dai_riquadri_set_restano_approssimativi(result) -> None:
+    """Le fasce titolo dei riquadri set continuano a essere lette (servono come
+    spareggio nell'assegnazione dei lati) e restano una lettura *rumorosa*.
+
+    Il ritaglio contiene anche "SQ.", l'orario e i cerchietti A/B, e il nome è
+    già abbreviato in stampa: il test è deliberatamente debole per non dichiarare
+    una precisione che non c'è.
+    """
+
+    names = {
+        observation.region_id: observation.candidates[0].value
+        for observation in result.observations_of(ExpectedType.TEAM_NAME)
+        if "-set" in observation.region_id
+    }
+    assert names, "nessun nome squadra letto dalle fasce titolo"
     joined = " ".join(names.values()).upper()
     assert "ROTHOBLAA" in joined
     assert "AZIMUT" in joined

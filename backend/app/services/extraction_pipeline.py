@@ -21,7 +21,7 @@ l'applicazione. Collega, nell'ordine di backend §18-§28:
 |---------------------------------|-----------|------------|
 | sestetti iniziali I-VI          | sì        | sì         |
 | punteggio finale di ogni set    | sì        | sì         |
-| nomi squadra                    | sì (testo esatto) | approssimativo (OCR della fascia titolo) |
+| nomi squadra                    | sì (testo esatto) | sì (OCR della fascia "SQUADRE") |
 | campionato/gara/data/ora/luogo  | sì        | no         |
 | sostituzioni                    | **no**    | **no**     |
 | punteggio al cambio di campo    | **no**    | **no**     |
@@ -49,8 +49,8 @@ sinistra, B = destra) che vanno associati alle squadre:
 2. nei set successivi l'associazione è dedotta dai **numeri di maglia**: si
    scelgono le due assegnazioni che massimizzano la sovrapposizione complessiva
    con i sestetti del primo set. È un criterio molto più solido dell'OCR dei
-   nomi squadra (che sul percorso raster è troncato) e su entrambe le fixture
-   separa i due casi con largo margine;
+   nomi nelle fasce titolo dei riquadri (che il modulo stampa abbreviati) e su
+   entrambe le fixture separa i due casi con largo margine;
 3. a parità di sovrapposizione si usa come spareggio la somiglianza fra i nomi
    letti nella fascia titolo del riquadro, e se anche quella è muta si mantiene
    l'ordine posizionale segnalandolo con un check di validazione.
@@ -104,10 +104,24 @@ _TEXT_FORMATION_RE = re.compile(
 _RASTER_FORMATION_RE = re.compile(
     r"^p(?P<page>\d+)-set(?P<set>\d+)-formation-(?P<slot>[ab])-(?P<position>VI|IV|III|II|V|I)$"
 )
-#: `p1-final_result-set1-score-a`
-_RASTER_SCORE_RE = re.compile(r"-set(?P<set>\d+)-score-(?P<slot>[ab])$")
-#: `p1-set1-team-a`
+#: `p1-final_result-row3-set1-score-a`. Il gruppo `row` è la RIGA FISICA della
+#: tabella "RISULTATO FINALE" ed è la parte che rende l'id unico; `set` è la
+#: cifra *letta* nella colonna centrale, che è invece solo la chiave di
+#: raggruppamento e può ripetersi fra righe diverse (vedi `_resolve_score`).
+#: `row` è opzionale perché gli id senza riga (fixture e percorsi storici)
+#: restano validi.
+_RASTER_SCORE_RE = re.compile(
+    r"(?:-row(?P<row>\d+))?-set(?P<set>\d+)-score-(?P<slot>[ab])$"
+)
+#: `p1-set1-team-a` (nome letto nella fascia titolo del riquadro set)
 _RASTER_TEAM_NAME_RE = re.compile(r"^p(?P<page>\d+)-set(?P<set>\d+)-team-(?P<slot>[ab])$")
+#: `p1-match_header-team-a` (nome letto nella fascia "SQUADRE" dell'header
+#: pagina, dove il modulo lo stampa per intero). Il suffisso opzionale copre il
+#: caso in cui la pagina produca più regioni classificate MATCH_HEADER e il
+#: layout detector ne disambigui l'id.
+_RASTER_HEADER_TEAM_RE = re.compile(
+    r"^p(?P<page>\d+)-match_header(?:-r\d+(?:-\d+)?)?-team-(?P<slot>[ab])$"
+)
 
 
 class ExtractionFailedError(RuntimeError):
@@ -148,6 +162,25 @@ class SlotFormation:
 
 
 @dataclass
+class ScoreReading:
+    """Una lettura del punteggio finale di un set per una delle due colonne.
+
+    Porta con sé la RIGA FISICA della tabella da cui viene: è ciò che distingue
+    due letture che dichiarano lo stesso numero di set, e senza cui l'ambiguità
+    non sarebbe nemmeno descrivibile.
+    """
+
+    slot: str
+    row: Optional[int]
+    candidate: ObservationCandidate
+    region_id: str
+
+    @property
+    def value(self) -> int:
+        return int(self.candidate.value)
+
+
+@dataclass
 class SetBoxReading:
     """Tutto ciò che è stato letto per un riquadro set, ancora in slot A/B."""
 
@@ -157,6 +190,15 @@ class SetBoxReading:
     #: tabella "RISULTATO FINALE", le cui colonne sono per squadra e NON per
     #: lato di campo (vedi `_score_for_teams`)
     score: Optional[tuple[int, int]] = None
+    #: TUTTE le letture del punteggio finale, per colonna (A/B): più di una
+    #: significa che più righe della tabella hanno dichiarato questo numero di
+    #: set. Nessuna viene scartata — `score` è solo quella selezionata.
+    score_readings: dict[str, list[ScoreReading]] = field(default_factory=dict)
+    #: id della SourceRegion da cui viene il punteggio selezionato, per colonna
+    score_region_ids: dict[str, str] = field(default_factory=dict)
+    #: descrizione dell'ambiguità quando più righe dichiarano lo stesso set,
+    #: vuota quando la lettura è univoca
+    score_conflicts: list[str] = field(default_factory=list)
     #: nome squadra letto nella fascia titolo del riquadro, per slot
     team_names: dict[str, ObservationCandidate] = field(default_factory=dict)
 
@@ -256,6 +298,7 @@ def _read_raster(pdf_path: Path, *, debug: bool) -> DocumentReading:
     result = extract_raster(pdf_path, debug=debug)
 
     boxes: dict[int, SetBoxReading] = {}
+    header_names: dict[str, list[ObservationCandidate]] = {}
     for observation in result.observations:
         region_id = observation.region_id
         formation = _RASTER_FORMATION_RE.match(region_id)
@@ -277,9 +320,20 @@ def _read_raster(pdf_path: Path, *, debug: bool) -> DocumentReading:
             box.team_names[slot] = max(observation.candidates, key=lambda c: c.confidence)
             continue
 
+        header = _RASTER_HEADER_TEAM_RE.match(region_id)
+        if header is not None and observation.candidates:
+            slot = header.group("slot").upper()
+            header_names.setdefault(slot, []).extend(observation.candidates)
+            continue
+
     # I punteggi vivono nella macroregione "RISULTATO FINALE", non nel riquadro
-    # set: si raccolgono a parte e si riuniscono per numero di set.
-    scores: dict[int, dict[str, int]] = {}
+    # set: si raccolgono a parte e si riuniscono per numero di set LETTO.
+    #
+    # Ogni cella ha un id unico per riga fisica della tabella, quindi qui
+    # possono arrivare più letture con lo stesso `set` per la stessa colonna: è
+    # un'ambiguità vera (due righe che dichiarano lo stesso numero di set) e
+    # `_resolve_score` la espone invece di scartarne una.
+    readings: dict[int, dict[str, list[ScoreReading]]] = {}
     for observation in result.observations:
         if observation.expected_type is not ExpectedType.SCORE:
             continue
@@ -289,22 +343,144 @@ def _read_raster(pdf_path: Path, *, debug: bool) -> DocumentReading:
         best = max(observation.candidates, key=lambda c: c.confidence)
         if not best.value.isdigit():
             continue
-        scores.setdefault(int(match.group("set")), {})[match.group("slot").upper()] = int(best.value)
-    for set_number, slots in scores.items():
-        if _SLOT_A in slots and _SLOT_B in slots:
-            box = boxes.setdefault(set_number, SetBoxReading(set_number=set_number))
-            box.score = (slots[_SLOT_A], slots[_SLOT_B])
+        row_group = match.group("row")
+        readings.setdefault(int(match.group("set")), {}).setdefault(
+            match.group("slot").upper(), []
+        ).append(
+            ScoreReading(
+                slot=match.group("slot").upper(),
+                row=int(row_group) if row_group is not None else None,
+                candidate=best,
+                region_id=observation.region_id,
+            )
+        )
+
+    for set_number, per_slot in sorted(readings.items()):
+        if _SLOT_A not in per_slot or _SLOT_B not in per_slot:
+            continue
+        box = boxes.setdefault(set_number, SetBoxReading(set_number=set_number))
+        box.score_readings = per_slot
+        selected, conflicts = _resolve_score(set_number, per_slot)
+        box.score_conflicts = conflicts
+        if selected is not None:
+            box.score = (selected[_SLOT_A].value, selected[_SLOT_B].value)
+            box.score_region_ids = {
+                slot: reading.region_id for slot, reading in selected.items()
+            }
 
     return DocumentReading(
         method=ExtractionMethod.OCR,
         sets=[boxes[number] for number in sorted(boxes)],
         regions=list(result.regions),
-        # Il percorso raster non legge l'header pagina: i nomi squadra vengono
-        # solo dalle fasce titolo dei riquadri set, slot per slot.
-        match_team_names={},
+        # I nomi squadra a livello di partita vengono dalla fascia "SQUADRE"
+        # dell'header pagina, l'unico punto in cui il modulo li stampa per
+        # intero; le fasce titolo dei riquadri set restano come ripiego (e come
+        # spareggio nell'assegnazione dei lati).
+        match_team_names={
+            slot: max(candidates, key=lambda c: (round(c.confidence, 2), len(c.value)))
+            for slot, candidates in header_names.items()
+            if candidates
+        },
         meta=MatchMeta(),
         diagnostics={"path": "raster-ocr", **result.diagnostics},
     )
+
+
+# ---------------------------------------------------------------------------
+# Punteggio finale: ambiguità fra righe della tabella
+# ---------------------------------------------------------------------------
+
+#: Punti necessari per vincere un set normale e un tie-break, e margine minimo:
+#: sono le regole di gioco, usate qui come VINCOLO DI DOMINIO per scegliere fra
+#: due righe della tabella che dichiarano lo stesso numero di set (stesso
+#: principio del validator, backend §26: i vincoli scartano letture impossibili,
+#: non correggono valori).
+_SET_POINTS_TO_WIN = 25
+_TIE_BREAK_POINTS_TO_WIN = 15
+_SET_WIN_MARGIN = 2
+#: Nessun set finisce oltre questi punti: serve a scartare le righe dei TOTALI
+#: (che nella tabella stanno sotto le righe dei set e contengono somme a due
+#: cifre alte) senza dipendere dalla loro posizione.
+_MAX_SET_POINTS = 60
+
+
+def _is_plausible_set_score(set_number: int, score_a: int, score_b: int) -> bool:
+    """Il punteggio può essere il risultato finale del set `set_number`?"""
+
+    winning = _TIE_BREAK_POINTS_TO_WIN if set_number >= 5 else _SET_POINTS_TO_WIN
+    high, low = max(score_a, score_b), min(score_a, score_b)
+    if high > _MAX_SET_POINTS:
+        return False
+    if high < winning:
+        return False
+    return high - low >= _SET_WIN_MARGIN
+
+
+def _resolve_score(
+    set_number: int, per_slot: dict[str, list[ScoreReading]]
+) -> tuple[Optional[dict[str, ScoreReading]], list[str]]:
+    """Sceglie la coppia di letture del punteggio e DESCRIVE l'ambiguità.
+
+    Ritorna `({slot: lettura}, conflitti)`. Quando una sola riga della tabella
+    ha dichiarato questo numero di set non c'è niente da decidere e `conflitti`
+    è vuota. Quando ce ne sono più di una:
+
+    1. si provano i vincoli di dominio (un risultato di set plausibile). Se ne
+       resta una sola, l'ambiguità è *risolta da un vincolo* — e resta comunque
+       dichiarata, come fa `validator.check_ambiguous_readings` per le letture
+       dei sestetti: l'utente deve sapere che lì c'era un conflitto;
+    2. se i vincoli non decidono (nessuna plausibile, o più di una), si prende la
+       riga con la confidence complessiva più alta e si dichiara che il valore va
+       verificato. Le letture non scelte NON vengono buttate: restano candidati
+       della `RawObservation` del punteggio (vedi `_observations_for`).
+    """
+
+    rows: dict[Optional[int], dict[str, ScoreReading]] = {}
+    for slot, slot_readings in per_slot.items():
+        for reading in slot_readings:
+            rows.setdefault(reading.row, {})[slot] = reading
+    complete = {
+        row: pair for row, pair in rows.items() if _SLOT_A in pair and _SLOT_B in pair
+    }
+    if not complete:
+        return None, []
+
+    def describe(row: Optional[int], pair: dict[str, ScoreReading]) -> str:
+        where = f"riga {row}" if row is not None else "riga non identificata"
+        return f"{where}: {pair[_SLOT_A].value}-{pair[_SLOT_B].value}"
+
+    def total_confidence(pair: dict[str, ScoreReading]) -> float:
+        return sum(reading.candidate.confidence for reading in pair.values())
+
+    # ordine deterministico: confidence complessiva, poi indice di riga
+    ranked = sorted(
+        complete.items(),
+        key=lambda item: (-total_confidence(item[1]), item[0] if item[0] is not None else -1),
+    )
+    if len(ranked) == 1:
+        return ranked[0][1], []
+
+    plausible = [
+        (row, pair)
+        for row, pair in ranked
+        if _is_plausible_set_score(set_number, pair[_SLOT_A].value, pair[_SLOT_B].value)
+    ]
+    others = [describe(row, pair) for row, pair in ranked]
+    if len(plausible) == 1:
+        row, pair = plausible[0]
+        return pair, [
+            f"set {set_number}: la cifra del set è stata letta in più righe della tabella "
+            f"RISULTATO FINALE ({'; '.join(others)}); scelta {describe(row, pair)} perché è "
+            "l'unica compatibile con un risultato di set valido. Le altre letture restano "
+            "come candidati alternativi."
+        ]
+
+    row, pair = ranked[0]
+    return pair, [
+        f"set {set_number}: la cifra del set è stata letta in più righe della tabella "
+        f"RISULTATO FINALE ({'; '.join(others)}) e nessun vincolo di gioco ha saputo "
+        f"decidere; si è tenuta {describe(row, pair)} (confidence più alta), da verificare."
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +575,7 @@ def _assign_slots(
 NOT_EXTRACTED_CHECK_ID = "fields-not-extracted"
 SLOT_AMBIGUOUS_CHECK_ID = "team-side-ambiguous"
 TEAM_NAME_CHECK_ID = "team-name-uncertain"
+SCORE_AMBIGUOUS_CHECK_ID = "final-score-row-ambiguous"
 FALLBACK_CHECK_ID = "pipeline-fallback"
 
 #: Aree del referto che nessuno dei due percorsi estrae ancora. Elencarle
@@ -443,6 +620,37 @@ def _observations_for(
                     candidates=list(candidates),
                 )
             )
+
+    # Punteggio finale: una osservazione per colonna della tabella, con TUTTE le
+    # letture come candidati. Quando due righe diverse hanno dichiarato lo stesso
+    # numero di set, entrambe finiscono qui con la propria confidence — è lo
+    # stesso modo in cui l'OCR delle celle rappresenta due letture alternative
+    # (`app/domain/raw_observation.py`), e nessuna lettura si perde per strada.
+    for slot in _SLOTS:
+        slot_readings = box.score_readings.get(slot)
+        if not slot_readings:
+            continue
+        # La tabella RISULTATO FINALE ha due colonne fisse per SQUADRA (non per
+        # lato di campo): la colonna A è sempre la squadra A, qualunque lato
+        # occupasse in quel set — vedi `_score_for_teams`. Qui NON si usa quindi
+        # `slot_to_team`, che è l'assegnazione dei lati dentro il riquadro set.
+        score_team_id = TEAM_A_ID if slot == _SLOT_A else TEAM_B_ID
+        by_value: dict[str, ObservationCandidate] = {}
+        for reading in slot_readings:
+            known = by_value.get(reading.candidate.value)
+            if known is None or reading.candidate.confidence > known.confidence:
+                by_value[reading.candidate.value] = reading.candidate
+        observations.append(
+            RawObservation(
+                id=f"obs-set{box.set_number}-{score_team_id}-final-score",
+                region_id=box.score_region_ids.get(slot, slot_readings[0].region_id),
+                expected_type=ExpectedType.SCORE,
+                method=method,
+                candidates=sorted(
+                    by_value.values(), key=lambda c: (-c.confidence, c.value)
+                ),
+            )
+        )
     return observations
 
 
@@ -484,6 +692,16 @@ def _build_set_data(
 
     checks = list(validation.checks)
     checks.append(_not_extracted_check(missing_score=score_ab is None))
+    if box.score_conflicts:
+        checks.append(
+            ValidationCheck(
+                id=SCORE_AMBIGUOUS_CHECK_ID,
+                label="Punteggio finale letto da più righe della tabella",
+                status=CheckStatus.WARNING,
+                message="; ".join(box.score_conflicts),
+                field_ids=[],
+            )
+        )
     if side_ambiguous:
         checks.append(
             ValidationCheck(
@@ -586,13 +804,15 @@ def _resolve_team_names(
                 f"{confidence if confidence is not None else 0.0:.2f}"
             )
         elif reading.method is ExtractionMethod.OCR:
-            # Documentato in tests/test_pdf_raster.py: il ritaglio della fascia
-            # titolo contiene anche "SQ.", l'orario e i cerchietti A/B, e l'OCR
-            # tronca facilmente l'ultima parola. Anche con confidence alta il
-            # valore va verificato.
+            # Un nome squadra letto via OCR va verificato anche quando la
+            # confidence è alta: è un testo libero, non un valore vincolato da
+            # regole di gioco, quindi nessun controllo a valle può accorgersi di
+            # una lettera sbagliata. Vale sia per la fascia "SQUADRE"
+            # dell'header (nome completo, ritaglio pulito) sia per le fasce
+            # titolo dei riquadri set, dove il modulo stampa il nome già
+            # abbreviato e il ritaglio contiene anche "SQ." e i cerchietti A/B.
             uncertain.append(
-                f"squadra {label}: '{name}' letto via OCR dalla fascia titolo "
-                "(lettura potenzialmente troncata)"
+                f"squadra {label}: '{name}' letto via OCR dal referto, da verificare"
             )
     if uncertain:
         checks.append(

@@ -28,6 +28,7 @@ funziona (in modalità degradata, solo geometrica) anche senza Tesseract.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -247,6 +248,12 @@ class DetectorConfig:
     min_valid_cells_without_label: int = 6
     #: confidence media minima delle celle valide di una finestra
     min_formation_confidence: float = 0.45
+    #: spazio bianco minimo perché due gruppi di testo nella stessa banda siano
+    #: considerati separati, come frazione dell'altezza della banda. Serve alle
+    #: fasce senza linee verticali interne (la fascia "SQUADRE" dell'header):
+    #: uno spazio fra parole è molto più stretto dell'altezza del testo, la
+    #: separazione fra due voci del modulo è molto più larga.
+    text_gap_frac: float = 0.5
 
 
 class LayoutDetector:
@@ -644,6 +651,11 @@ class LayoutDetector:
                 height=bh,
                 grid=self._grid_for(page, box),
             )
+            # L'indice del rettangolo nell'ordine di lettura è l'identità
+            # POSIZIONALE della regione: è l'unica cosa che resta unica anche
+            # quando due regioni si classificano allo stesso modo, e serve a
+            # disambiguare gli id parlanti qui sotto.
+            region.meta["macro_index"] = index
             self._classify(page, region)
             regions.append(region)
 
@@ -668,10 +680,40 @@ class LayoutDetector:
                 continue
             region.id = f"p{page.page_index + 1}-{region.kind.value.lower()}"
 
+        # Un id parlante descrive il CONTENUTO riconosciuto, che non è garantito
+        # unico: su una fixture reale la stessa pagina produce due regioni
+        # classificate MATCH_HEADER, e due `Region` con lo stesso id generano poi
+        # celle con lo stesso id, cioè letture diverse che si sovrascrivono a
+        # vicenda senza che nessuno se ne accorga. L'identità della regione deve
+        # invece essere unica per costruzione, quindi ai duplicati si aggiunge
+        # l'indice posizionale (la prima occorrenza conserva l'id pulito, così
+        # gli id restano stabili nel caso normale).
+        seen: set[str] = set()
+        for region in regions:
+            if region.id not in seen:
+                seen.add(region.id)
+                continue
+            base = region.id
+            index = region.meta.get("macro_index")
+            suffix = f"r{index:02d}" if isinstance(index, int) else f"r{len(seen):02d}"
+            unique = f"{base}-{suffix}"
+            attempt = 2
+            while unique in seen:
+                unique = f"{base}-{suffix}-{attempt}"
+                attempt += 1
+            region.meta["id_disambiguated_from"] = base
+            region.id = unique
+            seen.add(unique)
+
         diagnostics = {
             "n_regions": len(regions),
             "kinds": {k.value: sum(1 for r in regions if r.kind is k) for k in RegionKind},
             "probe_available": self.probe is not None,
+            "duplicate_region_ids": sorted(
+                str(r.meta["id_disambiguated_from"])
+                for r in regions
+                if "id_disambiguated_from" in r.meta
+            ),
         }
         return PageLayout(page=page, regions=regions, cells=[], diagnostics=diagnostics)
 
@@ -832,6 +874,134 @@ class LayoutDetector:
         )
         return lines
 
+    def _text_blobs(
+        self, page: RenderedPage, region: Region, row: int
+    ) -> tuple[tuple[int, int, int, int], ...]:
+        """Gruppi di testo separati da spazio bianco dentro una banda di riga.
+
+        Serve alle fasce che NON hanno linee verticali interne: l'header pagina
+        stampa `(A) <nome squadra> SQUADRE <nome squadra> (B)` senza alcun
+        separatore disegnato, quindi non esiste una griglia su cui ritagliare.
+        I gruppi si ricavano dal profilo di inchiostro per colonna: due gruppi
+        sono distinti quando fra loro c'è uno spazio bianco più largo di
+        `text_gap_frac` volte l'altezza della banda — uno spazio fra parole è
+        molto più stretto, la separazione fra due voci del modulo molto più
+        larga. Nessuna coordinata di pagina: solo la banda e la sua altezza.
+
+        Ritorna rettangoli LOCALI alla regione, già rientrati verticalmente per
+        escludere le linee di griglia della banda.
+        """
+
+        if not 0 <= row < region.grid.n_rows:
+            return ()
+        y1, y2 = region.grid.row_bands[row]
+        inset = max(2, int((y2 - y1) * self.config.cell_inset_frac))
+        top = y1 + inset
+        height = (y2 - y1) - 2 * inset
+        if height <= 2:
+            return ()
+        sub = page.crop(region.x, region.y + top, region.width, height)
+        if sub.size == 0:
+            return ()
+
+        binary = self._binarize(sub)
+        profile = binary.sum(axis=0) / 255.0
+        # Una colonna con pochissimo inchiostro è rumore di scansione (o della
+        # binarizzazione adattiva su fondo bianco), non testo.
+        inked = profile >= max(1.0, self.config.ink_threshold * height)
+        runs: list[list[int]] = []
+        for x, is_ink in enumerate(inked):
+            if not is_ink:
+                continue
+            if runs and x - runs[-1][1] <= 1:
+                runs[-1][1] = x
+            else:
+                runs.append([x, x])
+
+        min_gap = max(4, int(height * self.config.text_gap_frac))
+        merged: list[list[int]] = []
+        for start, end in runs:
+            if merged and start - merged[-1][1] < min_gap:
+                merged[-1][1] = end
+            else:
+                merged.append([start, end])
+        return tuple((start, top, end - start + 1, height) for start, end in merged)
+
+    #: L'etichetta stampata fra i due nomi squadra nell'header pagina.
+    _SQUADRE_LABEL = "SQUADRE"
+
+    def match_header_team_name_cells(
+        self, page: RenderedPage, region: Region
+    ) -> list[FieldCell]:
+        """Celle dei nomi squadra nella fascia "SQUADRE" dell'header pagina.
+
+        È la stessa fascia a cui si ancora il percorso text layer
+        (`app/extraction/text/header.py::_extract_team_names`) ed è l'unico punto
+        del referto in cui il nome è stampato PER INTERO: nelle fasce titolo dei
+        riquadri set e nell'intestazione dell'elenco giocatori il software di
+        refertazione lo abbrevia già in stampa ("AZIMUT GIO"), quindi leggere il
+        nome da lì significa partire da un valore troncato, e nessun OCR può
+        rimediare.
+
+        L'ancoraggio è l'etichetta "SQUADRE" stampata fra i due nomi: si cerca la
+        banda di riga che la contiene, si segmenta la banda nei suoi gruppi di
+        testo e si prendono il gruppo immediatamente a sinistra (squadra A del
+        modulo) e quello immediatamente a destra (squadra B). I cerchietti (A)/(B)
+        agli estremi restano fuori perché sono gruppi separati: non serve
+        ritagliare a occhio nessun margine.
+
+        Se l'etichetta non si legge, o non ha un gruppo di testo per parte, non
+        si ritorna nulla: il chiamante ripiega sulle fasce titolo dei riquadri
+        set, che sono peggiori ma non inventate.
+        """
+
+        for row in range(region.grid.n_rows):
+            y1, y2 = region.grid.row_bands[row]
+            band = self._read(page, region.absolute((0, y1, region.width, y2 - y1)))
+            if not _contains_label(band, self._SQUADRE_LABEL):
+                continue
+            blobs = self._text_blobs(page, region, row)
+            if len(blobs) < 3:
+                continue
+            label_index: Optional[int] = None
+            for index, rect in enumerate(blobs):
+                text = self._read(page, region.absolute(rect))
+                if _contains_label(text, self._SQUADRE_LABEL):
+                    label_index = index
+                    break
+            if label_index is None or label_index == 0 or label_index == len(blobs) - 1:
+                continue
+
+            cells: list[FieldCell] = []
+            for slot, rect in (
+                (TeamSlot.A, blobs[label_index - 1]),
+                (TeamSlot.B, blobs[label_index + 1]),
+            ):
+                ax, ay, aw, ah = region.absolute(rect)
+                cells.append(
+                    FieldCell(
+                        id=f"{region.id}-team-{slot.value.lower()}",
+                        region_id=region.id,
+                        role=CellRole.TEAM_NAME,
+                        expected_type=ExpectedType.TEAM_NAME,
+                        x=ax,
+                        y=ay,
+                        width=aw,
+                        height=ah,
+                        local=region.normalize_local(rect),
+                        meta={
+                            "team_slot": slot.value,
+                            # Distingue le due provenienze possibili del nome:
+                            # la pulizia lessicale a valle è diversa perché il
+                            # rumore intorno al nome è diverso.
+                            "name_band": "match_header",
+                            "grid_row": row,
+                        },
+                    )
+                )
+            return cells
+        return []
+
     def team_name_cells(self, page: RenderedPage, region: Region) -> list[FieldCell]:
         """Celle dei nomi squadra nella fascia titolo del riquadro set.
 
@@ -874,7 +1044,11 @@ class LayoutDetector:
                     width=aw,
                     height=ah,
                     local=region.normalize_local(local),
-                    meta={"set_number": region.set_number, "team_slot": slot.value},
+                    meta={
+                        "set_number": region.set_number,
+                        "team_slot": slot.value,
+                        "name_band": "set_box_title",
+                    },
                 )
             )
         return cells
@@ -893,8 +1067,25 @@ class LayoutDetector:
         Struttura del riquadro: `"T" S V P | SET  minuti | P V S "T"`. La colonna
         centrale (numero del set + durata) è nettamente la più larga: la si trova
         come massimo delle larghezze, e le due colonne dei punti sono quelle
-        immediatamente a sinistra e a destra. Le righe si identificano leggendo la
-        cifra del set nella colonna centrale, non contandole dall'alto.
+        immediatamente a sinistra e a destra.
+
+        ## Identità della cella vs. numero di set letto
+
+        Il numero di set NON entra nell'id della cella. Sono due cose diverse:
+
+        - l'**identità** della cella è la sua posizione fisica nella griglia
+          (`row`, `col`), che è unica per costruzione e non dipende da nessun
+          riconoscimento;
+        - il **numero di set** è un valore *letto via OCR* nella colonna centrale,
+          e come ogni lettura può ripetersi o sbagliare. Sta in
+          `meta["set_number"]`, dove chi aggrega le letture lo trova.
+
+        Usare la cifra letta come identità (com'era prima) faceva collidere gli id
+        di due righe diverse che leggevano la stessa cifra: a valle una delle due
+        letture sovrascriveva l'altra e l'ambiguità spariva senza che nessuno la
+        vedesse — esattamente la correzione silenziosa che backend §25 vieta. Ora
+        entrambe le righe arrivano in fondo e chi aggrega deve dichiarare il
+        conflitto (`app/services/extraction_pipeline.py`).
         """
 
         grid = region.grid
@@ -913,7 +1104,7 @@ class LayoutDetector:
             probe_rect = region.absolute(
                 _inset((cx, cy, max(4, int(cw * 0.30)), ch), self.config.cell_inset_frac)
             )
-            value, _conf = digit_reader(page.crop(*probe_rect))
+            value, set_conf = digit_reader(page.crop(*probe_rect))
             if not value or not value.isdigit() or not 1 <= int(value) <= 5:
                 continue
             set_number = int(value)
@@ -922,7 +1113,12 @@ class LayoutDetector:
                 ax, ay, aw, ah = region.absolute(local)
                 cells.append(
                     FieldCell(
-                        id=f"{region.id}-set{set_number}-score-{slot.value.lower()}",
+                        # `row{n}` PRIMA di `set{n}`: la riga è l'identità, la
+                        # cifra letta è solo un'etichetta di raggruppamento.
+                        id=(
+                            f"{region.id}-row{row}-set{set_number}"
+                            f"-score-{slot.value.lower()}"
+                        ),
                         region_id=region.id,
                         role=CellRole.SET_SCORE,
                         expected_type=ExpectedType.SCORE,
@@ -933,6 +1129,7 @@ class LayoutDetector:
                         local=region.normalize_local(local),
                         meta={
                             "set_number": set_number,
+                            "set_number_confidence": round(float(set_conf), 4),
                             "team_slot": slot.value,
                             "grid_row": row,
                             "grid_col": col,
@@ -943,6 +1140,41 @@ class LayoutDetector:
 
 
 # ------------------------------------------------------------------ helpers
+
+
+def _contains_label(text: str, label: str, *, min_ratio: float = 0.7) -> bool:
+    """True se in `text` c'è un token riconducibile all'etichetta `label`.
+
+    L'OCR di una striscia larga perde volentieri qualche lettera ("SQUADRE" letto
+    "SQDRE" quando la stessa pagina è renderizzata a 400dpi invece di 300): con un
+    confronto esatto l'ancoraggio a un'etichetta stampata dipenderebbe dal dpi di
+    rendering, che è esattamente ciò che questo modulo evita per principio.
+
+    Si accetta quindi un token che sia `label` con qualche lettera PERSA — mai con
+    lettere in più o in ordine diverso, perché il criterio è la sottosequenza
+    comune più lunga: "SQDRE" passa (5/7 lettere di "SQUADRE", nell'ordine),
+    "SERIE" no (3/7).
+    """
+
+    target = label.upper()
+    if not text or not target:
+        return False
+    needed = math.ceil(min_ratio * len(target))
+    for token in re.findall(r"[A-Za-z]+", text.upper()):
+        if len(token) > len(target) + 1:
+            continue
+        # lunghezza della sottosequenza comune più lunga (DP su stringhe corte)
+        previous = [0] * (len(target) + 1)
+        for char in token:
+            current = [0]
+            for j, other in enumerate(target):
+                current.append(
+                    previous[j] + 1 if char == other else max(current[j], previous[j + 1])
+                )
+            previous = current
+        if previous[-1] >= needed:
+            return True
+    return False
 
 
 def _contained(inner: tuple[int, int, int, int], outer: tuple[int, int, int, int], frac: float) -> bool:

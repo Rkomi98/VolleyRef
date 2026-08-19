@@ -31,6 +31,7 @@ from typing import Iterable, Optional
 import cv2
 import numpy as np
 
+from app.core.logging import get_logger
 from app.domain.raw_observation import ExpectedType, ObservationCandidate, RawObservation
 from app.extraction.raster.render import DEFAULT_DPI, RenderedPage, render_page
 from app.layout.detector import (
@@ -43,6 +44,8 @@ from app.layout.detector import (
 )
 from app.models.common import ExtractionMethod, SourceRegion
 from app.ocr.tesseract import TesseractOcr, is_valid_player_number
+
+logger = get_logger(__name__)
 
 #: Directory di default degli artefatti di debug, relativa alla root del backend.
 DEFAULT_DEBUG_ROOT = Path(__file__).resolve().parents[3] / "storage" / "debug"
@@ -64,7 +67,17 @@ _REGION_COLORS: dict[RegionKind, tuple[int, int, int]] = {
 
 #: Parole prestampate sul modulo che finiscono nel ritaglio del nome squadra
 #: insieme al nome vero e proprio (la cella della fascia titolo le contiene).
-_TEAM_NAME_STOPWORDS = {"SQU", "FINE", "INIZIO", "PUNTI", "LIBERO", "UNDER", "SET"}
+_TEAM_NAME_STOPWORDS = {
+    "SQ",
+    "SQU",
+    "SQUADRE",
+    "FINE",
+    "INIZIO",
+    "PUNTI",
+    "LIBERO",
+    "UNDER",
+    "SET",
+}
 
 _ROLE_COLORS: dict[CellRole, tuple[int, int, int]] = {
     CellRole.STARTING_SIX: (0, 0, 255),
@@ -223,6 +236,42 @@ def _collect_cells(
             cells.extend(detector.team_name_cells(page, region))
         elif region.kind is RegionKind.FINAL_RESULT:
             cells.extend(detector.set_score_cells(page, region, digit_reader=read_player_number))
+        elif region.kind is RegionKind.MATCH_HEADER:
+            # La fascia "SQUADRE" dell'header è l'unico posto in cui il nome
+            # squadra è stampato per intero (le fasce titolo dei riquadri set lo
+            # abbreviano già in stampa).
+            cells.extend(detector.match_header_team_name_cells(page, region))
+    return _unique_cell_ids(cells)
+
+
+def _unique_cell_ids(cells: list[FieldCell]) -> list[FieldCell]:
+    """Garantisce l'invariante «una cella, un id» all'uscita dal layout detector.
+
+    Ogni cella diventa una `SourceRegion` con il proprio id, e il frontend usa
+    quell'id come chiave: due celle con lo stesso id sono una lettura che
+    sovrascrive l'altra, cioè un dato perso in silenzio (backend §25). Gli id
+    prodotti dal detector sono unici per costruzione — sono ancorati alla
+    posizione nella griglia — ma l'invariante è troppo importante per dipendere
+    da quella promessa: qui si verifica, e in caso di collisione si conserva
+    ANCHE la seconda lettura con un id disambiguato, senza scartarla.
+    """
+
+    seen: set[str] = set()
+    for cell in cells:
+        if cell.id not in seen:
+            seen.add(cell.id)
+            continue
+        base = cell.id
+        attempt = 2
+        while f"{base}-dup{attempt}" in seen:
+            attempt += 1
+        cell.id = f"{base}-dup{attempt}"
+        cell.meta = {**cell.meta, "duplicate_of": base}
+        seen.add(cell.id)
+        logger.warning(
+            "id di cella duplicato dal layout detector",
+            extra={"duplicate_of": base, "renamed_to": cell.id, "role": cell.role.value},
+        )
     return cells
 
 
@@ -280,10 +329,16 @@ def _clean_candidates(
 
     - numeri di maglia: si scartano i candidati fuori dal range regolamentare
       1-99 (non sono letture alternative plausibili, sono rumore);
-    - nomi squadra: la cella della fascia titolo contiene anche l'etichetta
-      "SQ.", l'orario di inizio/fine e i cerchietti A/B; si tengono solo i token
-      alfabetici di almeno tre lettere, che è quanto basta per far emergere
-      "ROTHOBLAAS" / "AZIMUT GIO" senza riscrivere niente.
+    - nomi squadra: dipende da quale fascia è stata ritagliata (`meta["name_band"]`).
+      Nella fascia titolo del riquadro set il ritaglio contiene anche l'etichetta
+      "SQ.", l'orario di inizio/fine e i cerchietti A/B, quindi si tengono solo i
+      token alfabetici di almeno TRE lettere: è quanto basta per far emergere
+      "ROTHOBLAAS" / "AZIMUT GIO" scartando i residui di due caratteri ("BH",
+      "PX", "By") che l'OCR ricava dai cerchietti. Nella fascia "SQUADRE"
+      dell'header il ritaglio contiene il solo nome (i cerchietti sono gruppi di
+      testo separati, esclusi dal ritaglio), quindi la soglia scende a DUE
+      lettere: altrimenti saremmo noi a troncare le sigle provinciali del nome
+      completo ("ROTHOBLAAS VOLANO TN", "AZIMUT GIORGIONE TV").
     """
 
     if cell.expected_type is ExpectedType.PLAYER_NUMBER:
@@ -291,12 +346,14 @@ def _clean_candidates(
     if cell.expected_type is ExpectedType.SCORE:
         return [c for c in candidates if c.value.isdigit() and 0 <= int(c.value) <= 99]
     if cell.expected_type is ExpectedType.TEAM_NAME:
+        from_header = cell.meta.get("name_band") == "match_header"
+        token_re = re.compile(r"[A-Za-z]{2,}" if from_header else r"[A-Za-z]{3,}")
         cleaned: list[ObservationCandidate] = []
         seen: set[str] = set()
         for candidate in candidates:
             tokens = [
                 token
-                for token in re.findall(r"[A-Za-z]{3,}", candidate.value)
+                for token in token_re.findall(candidate.value)
                 if token.upper() not in _TEAM_NAME_STOPWORDS
             ]
             value = " ".join(tokens).upper().strip()
