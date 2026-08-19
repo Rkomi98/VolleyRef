@@ -16,5 +16,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-EXPOSE 8000
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Le Vercel Functions hanno il filesystem dell'immagine in sola lettura e
+# consentono scritture solo nello scratch space /tmp. Questi valori restano
+# sovrascrivibili a runtime quando si collega uno storage persistente.
+ENV DATABASE_URL=sqlite:////tmp/volleyref.db \
+    STORAGE_DIR=/tmp/volleyref-storage
+
+# Vercel instrada i container sulla porta 80 se PORT non e configurata.
+EXPOSE 80
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-80}"]
