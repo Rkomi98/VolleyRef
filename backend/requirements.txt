@@ -39,6 +39,5 @@ typing-inspection==0.4.4
 typing_extensions==4.16.0
 uvicorn==0.52.3
 uvloop==0.22.1
--e git+https://github.com/Rkomi98/VolleyRef.git@46e0b3f8b1b897e56451eb8fa570d9343ccb7571#egg=volleyref_backend&subdirectory=backend
 watchfiles==1.2.0
 websockets==17.0.1

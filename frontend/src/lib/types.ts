@@ -141,6 +141,7 @@ export type ApiErrorCode =
   | "ANALYSIS_FAILED"
   | "INVALID_FIELD_VALUE"
   | "EXPORT_FAILED"
+  | "SOURCE_PDF_MISSING"
   | "INTERNAL_ERROR"
 
 export type ApiError = {

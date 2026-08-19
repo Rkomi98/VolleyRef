@@ -24,10 +24,10 @@ import os
 import re
 import uuid
 from dataclasses import dataclass
-from pathlib import PurePosixPath
-from typing import Optional
+from pathlib import Path, PurePosixPath
+from typing import Optional, Union
 
-from app.core.errors import InvalidFileError, UnsupportedPdfError
+from app.core.errors import InvalidFileError, SourceFileMissingError, UnsupportedPdfError
 
 # Un PDF valido inizia con questa signature. La cerchiamo in una finestra
 # limitata di byte iniziali (mai sull'intero file): un file malevolo che
@@ -163,3 +163,32 @@ def validate_pdf_upload(
         content_type=content_type,
         size_bytes=size,
     )
+
+
+def resolve_pdf_within_storage(storage_dir: Path, pdf_path: Union[str, Path]) -> Path:
+    """Risolve il path del PDF salvato per un'analisi e ne verifica il
+    contenimento in `storage_dir` prima che possa essere servito via API
+    (`GET /analyses/{id}/source-pdf`).
+
+    Difesa in profondità: il path scritto in `AnalysisRecord.pdf_path` è oggi
+    generato internamente (mai da input client, si veda il modulo docstring),
+    ma questo controllo resta l'ultima barriera indipendente da *come* quel
+    path è stato costruito — se in futuro un bug altrove permettesse a un
+    path esterno di finire nel record, qui verrebbe comunque rifiutato prima
+    di leggere qualunque cosa dal filesystem.
+
+    Solleva `SourceFileMissingError` sia quando il path risolto esce da
+    `storage_dir` sia quando il file non esiste più su disco: dal punto di
+    vista del client sono lo stesso esito osservabile ("il PDF originale non
+    è disponibile") — non vogliamo distinguere le due risposte e fornire così
+    un segnale utile a un tentativo di path traversal.
+    """
+
+    storage_root = storage_dir.resolve()
+    resolved = Path(pdf_path).resolve()
+    contained = resolved == storage_root or storage_root in resolved.parents
+    if not contained or not resolved.is_file():
+        raise SourceFileMissingError(
+            "Il PDF originale di questa analisi non è più disponibile."
+        )
+    return resolved

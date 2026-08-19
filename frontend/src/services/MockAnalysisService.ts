@@ -902,6 +902,13 @@ export class MockAnalysisService implements AnalysisService {
     return buildCsvBlob(analysis, dataset)
   }
 
+  getSourcePdfUrl(): string | null {
+    // Modalità mock: non esiste un backend reale da cui recuperare il PDF.
+    // Il chiamante (PdfViewer, tramite MatchWorkspace) ricade sulla cache
+    // in memoria del file appena caricato, o sullo stato vuoto.
+    return null
+  }
+
   private getRecord(analysisId: string): StoredAnalysis {
     const record = this.store.get(analysisId)
     if (!record) {

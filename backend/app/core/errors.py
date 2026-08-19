@@ -104,6 +104,17 @@ class UnsupportedPdfError(AppError):
     http_status = 400
 
 
+class SourceFileMissingError(AppError):
+    """Il PDF originale registrato per un'analisi non è più disponibile:
+    o il path risolto non è contenuto nella storage dir prevista, o il file
+    non esiste più su disco (es. storage effimero azzerato tra un deploy e
+    l'altro). Le due cause sono deliberatamente indistinguibili dal punto di
+    vista del client — vedi `app.core.security.resolve_pdf_within_storage`."""
+
+    code = ErrorCode.SOURCE_PDF_MISSING
+    http_status = 404
+
+
 # ---------------------------------------------------------------------------
 # Mappatura ErrorCode -> HTTP status, condivisa fra AppError "nostri" e gli
 # errori di dominio esterni riconosciuti per duck typing.

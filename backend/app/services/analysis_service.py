@@ -1,21 +1,24 @@
-"""Orchestrazione delle Analysis: upload, pipeline mock, correzioni, export.
+"""Orchestrazione delle Analysis: upload, pipeline, correzioni, export.
 
 Specifica di riferimento: 02_volleyref_backend_prompt.md §4-§20, §44.
 
-Questo modulo implementa il "contratto vivente" descritto al §44: prima un
-flusso end-to-end funzionante con risultati **canned/mock**, poi — in un task
-successivo — la sostituzione progressiva della pipeline con parsing reale
-(app/pdf, app/layout, app/extraction, app/ocr, app/volleyball) senza cambiare
-il contratto pubblico osservabile da questo servizio.
+La pipeline vera vive in `app.services.extraction_pipeline` (inspect_pdf →
+percorso text-layer o raster/OCR → RawObservation → parser → validator →
+`Analysis`); questo modulo la orchestra e ne pubblica il risultato.
 
-Il set 1 della fixture "ISUZU CEREA VR vs ROTHOBLAAS VOLANO TN" usa i valori
-reali documentati al §28; i set 2-4 e i turni di servizio sono fabbricati ma
-internamente coerenti (punteggi monotoni, somma dei turni = punteggio finale).
+`build_canned_analysis` (i dati fabbricati del "contratto vivente" di §44)
+resta come **fallback esplicito**, per due casi: la pipeline reale disabilitata
+via `VOLLEYREF_USE_REAL_PIPELINE=0`, e un'estrazione che solleva un'eccezione su
+un PDF non supportato (per esempio un percorso raster senza Tesseract
+installato). Il fallback non è mai silenzioso: emette un log di livello ERROR e
+inserisce nel risultato il check `pipeline-fallback` con stato `INVALID`, così
+che nessuno possa confondere numeri fabbricati con dati letti dal referto.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import uuid
 from pathlib import Path
@@ -23,6 +26,7 @@ from typing import Optional
 
 from fastapi import BackgroundTasks
 
+from app.core.logging import get_logger
 from app.models.analysis import (
     Analysis,
     AnalysisGlobalStatus,
@@ -43,7 +47,35 @@ from app.models.match import (
     ValidationCheck,
     ValidationResult,
 )
+from app.core.security import resolve_pdf_within_storage
 from app.repositories.analysis_repository import AnalysisRecord, AnalysisRepository
+from app.services.extraction_pipeline import fallback_check, run_real_pipeline
+from app.volleyball.parser import starting_six_field_id
+
+_logger = get_logger(__name__)
+
+# --------------------------------------------------------------------------
+# Selettore pipeline reale / fallback canned (backend §44).
+# --------------------------------------------------------------------------
+
+REAL_PIPELINE_ENV_VAR = "VOLLEYREF_USE_REAL_PIPELINE"
+"""Env var che governa l'uso della pipeline di estrazione reale.
+
+Default: **attiva**. Impostarla a `0`/`false`/`no`/`off` forza il fallback
+canned, utile per lavorare sul frontend senza Tesseract installato — ma il
+risultato resta marcato `INVALID` con il check `pipeline-fallback`, perché anche
+in quel caso i numeri mostrati non vengono dal PDF caricato.
+"""
+
+_FALSEY = {"0", "false", "no", "off"}
+
+
+def real_pipeline_enabled() -> bool:
+    raw = os.environ.get(REAL_PIPELINE_ENV_VAR)
+    if raw is None:
+        return True
+    return raw.strip().lower() not in _FALSEY
+
 
 # --------------------------------------------------------------------------
 # Errori di dominio — mappati sulle risposte ErrorEnvelope da main.py.
@@ -174,14 +206,19 @@ def _rotate(seq: list[int], n: int) -> list[int]:
 
 def _six_for_set(
     set_number: int,
-    team_slug: str,
+    team_id: str,
     base_order: list[int],
     rotation_shift: int,
     low_confidence_label: Optional[RotationLabel] = None,
 ) -> tuple[StartingSix, dict[RotationLabel, int]]:
     """Costruisce lo StartingSix di un set applicando una rotazione fissa
     dei sei titolari rispetto al set 1 — semplificazione plausibile: la
-    formazione di partenza di un set spesso ruota rispetto al precedente."""
+    formazione di partenza di un set spesso ruota rispetto al precedente.
+
+    Gli id dei campi usano `starting_six_field_id` (app/volleyball/parser.py),
+    la stessa convenzione della pipeline reale e dei `field_ids` emessi dal
+    validator: un'unica forma di id, così il frontend naviga alle anomalie allo
+    stesso modo qualunque pipeline abbia prodotto l'analisi."""
 
     rotated = _rotate(base_order, rotation_shift)
     labels = [
@@ -196,7 +233,7 @@ def _six_for_set(
 
     values: dict[str, dict] = {}
     for label in labels:
-        field_id = f"set{set_number}-{team_slug}-position-{label.value}"
+        field_id = starting_six_field_id(set_number, team_id, label.value)
         player = mapping[label]
         confidence = 0.6 if label == low_confidence_label else 0.95
         values[label.value] = {
@@ -340,10 +377,10 @@ def _build_set(
     low_confidence_turn_index: Optional[int] = None,
 ) -> SetData:
     six_a, mapping_a = _six_for_set(
-        set_number, "teamA", cerea_order, rotation_shift, low_confidence_label
+        set_number, _TEAM_A_ID, cerea_order, rotation_shift, low_confidence_label
     )
     six_b, mapping_b = _six_for_set(
-        set_number, "teamB", rothoblaas_order, rotation_shift
+        set_number, _TEAM_B_ID, rothoblaas_order, rotation_shift
     )
     turns = _build_service_turns(
         set_number,
@@ -367,7 +404,9 @@ def _build_set(
     if low_confidence_label is not None or low_confidence_turn_index is not None:
         low_field_ids = []
         if low_confidence_label is not None:
-            low_field_ids.append(f"set{set_number}-teamA-position-{low_confidence_label.value}")
+            low_field_ids.append(
+                starting_six_field_id(set_number, _TEAM_A_ID, low_confidence_label.value)
+            )
         if low_confidence_turn_index is not None:
             low_field_ids.append(f"set{set_number}-turn-{low_confidence_turn_index:03d}-player")
         checks.append(
@@ -393,9 +432,13 @@ def _build_set(
 
 
 def build_canned_analysis(analysis_id: str) -> Analysis:
-    """Analysis CANNED completa (backend §28, §44) — verrà sostituita dal
-    parsing reale una volta collegati app/pdf, app/layout, app/extraction,
-    app/ocr e app/volleyball (fuori dal perimetro di questo task)."""
+    """Analysis CANNED completa (backend §28, §44) — **dati fabbricati**.
+
+    Non è più la pipeline di default: quella è `run_real_pipeline`. Resta come
+    fallback per i casi in cui l'estrazione reale non è disponibile, e chi la
+    usa DEVE marcare il risultato (vedi `AnalysisService._canned_fallback`):
+    questi numeri non provengono da nessun PDF.
+    """
 
     cerea_order_set1 = [2, 5, 3, 8, 14, 9]  # I, II, III, IV, V, VI
     rothoblaas_order_set1 = [14, 9, 3, 4, 15, 17]
@@ -585,10 +628,11 @@ class AnalysisService:
             analysis_id=analysis_id, status=AnalysisGlobalStatus(record.status)
         )
 
-    # -- pipeline mock ------------------------------------------------------
+    # -- pipeline -----------------------------------------------------------
 
     async def _run_pipeline(self, analysis_id: str) -> None:
         total_steps = len(_STEP_ORDER)
+        analysis: Optional[Analysis] = None
         for index in range(total_steps):
             progress_processing = int(round((index / total_steps) * 100))
             self._repository.update_progress(
@@ -598,7 +642,14 @@ class AnalysisService:
                 current_step=_STEP_ORDER[index].value,
                 steps=_steps_snapshot(completed_up_to=index, processing_index=index),
             )
-            await asyncio.sleep(_STEP_DELAY_SECONDS)
+            if _STEP_ORDER[index] is ProcessingStepId.READ_DOCUMENT:
+                # Il lavoro vero (rendering, OCR, parsing) è sincrono e può
+                # durare decine di secondi sul percorso raster: va fuori dal
+                # loop asyncio, altrimenti il polling di `GET .../status`
+                # resterebbe bloccato per tutta la durata dell'estrazione.
+                analysis = await asyncio.to_thread(self._produce_analysis, analysis_id)
+            else:
+                await asyncio.sleep(_STEP_DELAY_SECONDS)
 
             progress_completed = int(round(((index + 1) / total_steps) * 100))
             self._repository.update_progress(
@@ -609,7 +660,8 @@ class AnalysisService:
                 steps=_steps_snapshot(completed_up_to=index + 1, processing_index=None),
             )
 
-        analysis = build_canned_analysis(analysis_id)
+        if analysis is None:  # pragma: no cover - difensivo
+            analysis = self._canned_fallback(analysis_id, "pipeline non eseguita")
         self._repository.save_result(
             analysis_id,
             status=AnalysisGlobalStatus.READY.value,
@@ -622,6 +674,66 @@ class AnalysisService:
             current_step=None,
             steps=_steps_snapshot(completed_up_to=total_steps, processing_index=None),
         )
+
+    # -- scelta fra pipeline reale e fallback canned -------------------------
+
+    def _produce_analysis(self, analysis_id: str) -> Analysis:
+        """Esegue l'estrazione reale sul PDF caricato, con fallback tracciato.
+
+        Un PDF non supportato non deve far crashare l'app, ma non deve nemmeno
+        ricadere in silenzio su dati fabbricati: ogni ripiego passa da
+        `_canned_fallback`, che logga e marca il risultato.
+        """
+
+        if not real_pipeline_enabled():
+            return self._canned_fallback(
+                analysis_id, f"pipeline reale disabilitata da {REAL_PIPELINE_ENV_VAR}"
+            )
+
+        record = self._repository.get(analysis_id)
+        if record is None or not record.pdf_path:
+            return self._canned_fallback(analysis_id, "PDF originale non disponibile")
+
+        try:
+            result = run_real_pipeline(record.pdf_path, analysis_id)
+        except Exception as exc:  # noqa: BLE001 - qualunque errore ⇒ fallback tracciato
+            _logger.error(
+                "estrazione reale fallita, ripiego su dati simulati",
+                exc_info=True,
+                extra={
+                    "analysis_id": analysis_id,
+                    "pdf_path": record.pdf_path,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return self._canned_fallback(analysis_id, f"{type(exc).__name__}: {exc}")
+
+        _logger.info(
+            "analisi prodotta dalla pipeline reale",
+            extra={
+                "analysis_id": analysis_id,
+                "method": result.method.value,
+                "sets": [s.number for s in result.analysis.sets],
+                "overall_validation": result.analysis.overall_validation.value
+                if result.analysis.overall_validation
+                else None,
+                "diagnostics": result.diagnostics,
+            },
+        )
+        return result.analysis
+
+    def _canned_fallback(self, analysis_id: str, reason: str) -> Analysis:
+        """Analysis canned marcata come NON proveniente dal PDF caricato."""
+
+        _logger.error(
+            "risultato canned servito al posto dell'estrazione reale",
+            extra={"analysis_id": analysis_id, "reason": reason},
+        )
+        analysis = build_canned_analysis(analysis_id)
+        analysis.validation.checks.insert(0, fallback_check(reason))
+        analysis.validation.status = CheckStatus.INVALID
+        analysis.overall_validation = CheckStatus.INVALID
+        return analysis
 
     # -- lettura ------------------------------------------------------------
 
@@ -648,6 +760,14 @@ class AnalysisService:
     def get_analysis(self, analysis_id: str) -> Analysis:
         record = self._get_record_or_raise(analysis_id)
         return Analysis.model_validate(record.analysis_json or {})
+
+    def get_source_pdf_path(self, analysis_id: str) -> Path:
+        """Path assoluto e verificato del PDF originale caricato per
+        l'analisi (usato da `GET /analyses/{id}/source-pdf`); il
+        contenimento nella storage dir e l'esistenza su disco sono
+        validati da `app.core.security.resolve_pdf_within_storage`."""
+        record = self._get_record_or_raise(analysis_id)
+        return resolve_pdf_within_storage(self._storage_dir, record.pdf_path)
 
     # -- correzioni manuali ---------------------------------------------------
 

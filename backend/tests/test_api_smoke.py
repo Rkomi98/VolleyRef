@@ -79,6 +79,19 @@ def _poll_until_ready(client: TestClient, analysis_id: str, timeout: float = 10.
     pytest.fail(f"Analysis {analysis_id} did not reach READY in {timeout}s: {last_body}")
 
 
+def _field_id_set1_team_a_position_i(client: TestClient, analysis_id: str) -> str:
+    """Id del campo dal risultato, non hardcodato.
+
+    Gli id dei campi sono un dettaglio interno del contratto (li produce
+    `app.volleyball.parser.starting_six_field_id`): un test che li scrive a mano
+    verifica la convenzione di naming invece del comportamento, e si rompe
+    ad ogni cambio di pipeline. Qui si legge l'id dall'analisi appena prodotta.
+    """
+
+    analysis = client.get(f"/api/v1/analyses/{analysis_id}").json()
+    return analysis["sets"][0]["team_a_starting_six"]["I"]["id"]
+
+
 def test_full_flow_text_layer_fixture_matches_known_values(client: TestClient) -> None:
     """Upload -> PROCESSING -> READY -> GET, con i valori reali del §28."""
 
@@ -124,7 +137,7 @@ def test_patch_field_updates_value_and_preserves_original(client: TestClient) ->
     analysis_id = _upload(client, FIXTURE_PDF_TEXT_LAYER)
     _poll_until_ready(client, analysis_id)
 
-    field_id = "set1-teamA-position-I"
+    field_id = _field_id_set1_team_a_position_i(client, analysis_id)
     response = client.patch(
         f"/api/v1/analyses/{analysis_id}/fields/{field_id}", json={"value": 99}
     )
@@ -147,7 +160,7 @@ def test_reset_corrections_restores_original_value(client: TestClient) -> None:
     analysis_id = _upload(client, FIXTURE_PDF_TEXT_LAYER)
     _poll_until_ready(client, analysis_id)
 
-    field_id = "set1-teamA-position-I"
+    field_id = _field_id_set1_team_a_position_i(client, analysis_id)
     client.patch(f"/api/v1/analyses/{analysis_id}/fields/{field_id}", json={"value": 42})
 
     response = client.post(f"/api/v1/analyses/{analysis_id}/reset-corrections")
@@ -162,7 +175,7 @@ def test_reanalyze_restarts_pipeline_and_clears_manual_edits(client: TestClient)
     analysis_id = _upload(client, FIXTURE_PDF_TEXT_LAYER)
     _poll_until_ready(client, analysis_id)
 
-    field_id = "set1-teamA-position-I"
+    field_id = _field_id_set1_team_a_position_i(client, analysis_id)
     client.patch(f"/api/v1/analyses/{analysis_id}/fields/{field_id}", json={"value": 42})
 
     response = client.post(f"/api/v1/analyses/{analysis_id}/reanalyze")

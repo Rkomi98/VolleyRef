@@ -108,4 +108,10 @@ export class HttpAnalysisService implements AnalysisService {
   async exportCsv(analysisId: string, dataset: ExportDataset): Promise<Blob> {
     return requestBlob(`/analyses/${encodeURIComponent(analysisId)}/export.csv?dataset=${encodeURIComponent(dataset)}`)
   }
+
+  getSourcePdfUrl(analysisId: string): string {
+    // Nessun `fetch` qui: l'URL è passato a `PdfViewer`, che lo dà a pdf.js
+    // per il caricamento (e per un eventuale `<iframe>`/tag `src` diretto).
+    return `${getApiBaseUrl()}/analyses/${encodeURIComponent(analysisId)}/source-pdf`
+  }
 }

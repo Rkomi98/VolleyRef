@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, Request, Response, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.export.csv import build_csv
@@ -66,6 +67,28 @@ def get_analysis(
     analysis_id: str, service: AnalysisService = Depends(get_analysis_service)
 ) -> Analysis:
     return service.get_analysis(analysis_id)
+
+
+@router.get("/{analysis_id}/source-pdf")
+def get_source_pdf(
+    analysis_id: str, service: AnalysisService = Depends(get_analysis_service)
+) -> FileResponse:
+    """Serve il PDF originale caricato per l'analisi, per il render inline
+    nel `PdfViewer` del frontend (mai come download: `Content-Disposition`
+    è sempre `inline`). Il path è risolto e validato da
+    `AnalysisService.get_source_pdf_path` (contenimento nella storage dir +
+    esistenza su disco); solleva `AnalysisNotFoundError` (404,
+    `ANALYSIS_NOT_FOUND`) se l'id non esiste, `SourceFileMissingError` (404,
+    `SOURCE_PDF_MISSING`) se il file non è più disponibile su disco — in
+    entrambi i casi la mappatura in `ErrorEnvelope` è a carico dell'handler
+    centralizzato (app/core/errors.py), non di questo router.
+    """
+    pdf_path = service.get_source_pdf_path(analysis_id)
+    return FileResponse(
+        pdf_path,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'inline; filename="documento.pdf"'},
+    )
 
 
 @router.patch("/{analysis_id}/fields/{field_id}", response_model=Analysis)

@@ -249,9 +249,15 @@ export function MatchWorkspace({ analysisId }: MatchWorkspaceProps) {
     if (setIndex < analysis.sets.length - 1) setCurrentSetNumber(analysis.sets[setIndex + 1].number)
   }
 
+  // Il file appena caricato nella stessa sessione (se c'è) evita un round-trip
+  // verso il backend; altrimenti (reload, apertura via URL diretto, o analisi
+  // aperta in un'altra sessione) si ricade sull'URL servito dal backend —
+  // `null` in modalità mock, dove non esiste alcun PDF originale recuperabile.
+  const pdfUrl = getUploadedFile(analysisId) ?? analysisService.getSourcePdfUrl(analysisId)
+
   const pdfPanel = (
     <PdfViewer
-      pdfUrl={getUploadedFile(analysisId) ?? null}
+      pdfUrl={pdfUrl}
       regions={analysis.sourceRegions}
       selectedRegionId={selectedRegionId}
       onRegionClick={(regionId) => handleRegionClick(regionId)}

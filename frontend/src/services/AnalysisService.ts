@@ -23,4 +23,12 @@ export interface AnalysisService {
   reanalyze(analysisId: string): Promise<void>
   exportExcel(analysisId: string): Promise<Blob>
   exportCsv(analysisId: string, dataset: ExportDataset): Promise<Blob>
+  /**
+   * URL da cui `PdfViewer` può caricare il referto originale (render inline,
+   * mai un download) quando il file appena caricato non è più in memoria —
+   * ad es. dopo un reload della pagina o apertura diretta via URL. `null`
+   * quando non esiste alcun URL utilizzabile (`MockAnalysisService`: non
+   * c'è un backend reale da cui recuperarlo).
+   */
+  getSourcePdfUrl(analysisId: string): string | null
 }

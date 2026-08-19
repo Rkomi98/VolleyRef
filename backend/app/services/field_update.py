@@ -17,17 +17,30 @@ Due livelli di utilizzo, deliberatamente unificati sulla stessa funzione core
    un'ambiguità fa sparire il check `ambiguous-reading`, perché `ParsedSet`
    porta con sé `resolutions` (backend §26) e la correzione manuale marca la
    risoluzione come confermata.
-2. Sulla `SetData` pubblica dentro un'`Analysis` persistita come blob JSON
-   (lo scaffold mock di B1: `app.services.analysis_service`). `SetData` non
-   porta `resolutions` — quella provenienza esiste solo nell'output del
-   parser e non fa parte del contratto pubblico (backend §7) — quindi per
-   rivalidare si costruisce un `ParsedSet` "shim" con risoluzioni sintetiche
-   (una per campo, non ambigue, confidence presa da `ExtractedValue.confidence`)
-   che permette comunque di richiamare `validate_set` invece di duplicarne la
-   logica. È una degradazione nota e documentata: senza il parser reale
-   collegato all'API (fuori dal perimetro di questo task, vedi commenti in
-   `analysis_service.py`), l'API non può segnalare "ambiguità risolta da un
-   vincolo" perché quell'informazione non è mai stata persistita.
+2. Sulla `SetData` pubblica dentro un'`Analysis` persistita come blob JSON.
+   `SetData` non porta `resolutions` — quella provenienza esiste solo
+   nell'output del parser e non fa parte del contratto pubblico (backend §7) —
+   quindi per rivalidare si costruisce un `ParsedSet` "shim" con risoluzioni
+   sintetiche (una per campo, non ambigue, confidence presa da
+   `ExtractedValue.confidence`) che permette comunque di richiamare
+   `validate_set` invece di duplicarne la logica.
+
+   Con la pipeline reale collegata (`app.services.extraction_pipeline`) questa
+   resta una degradazione **parziale e nota**, e vale la pena essere precisi su
+   quale: al momento dell'estrazione il parser produce le `CandidateResolution`
+   vere e `validate_set` gira su quelle, quindi i check `ambiguous-reading` /
+   `domain-compatibility` / `low-confidence` del primo risultato sono corretti e
+   vengono persistiti dentro `SetData.validation`. Ciò che non sopravvive è la
+   *struttura*: alla prima rivalidazione (una correzione manuale, un
+   reset-corrections) lo shim ricostruisce risoluzioni non ambigue e quei tre
+   check tornano `VALID` anche per campi che erano ambigui e che nessuno ha
+   toccato. La confidence per campo, che è dentro `ExtractedValue`, non si perde
+   mai: `low-confidence` continua quindi a funzionare, mentre "ambiguità risolta
+   da un vincolo" è un'informazione che il modello pubblico non conserva.
+
+   Chiuderla richiederebbe persistere le risoluzioni accanto all'`Analysis`
+   (una struttura satellite nel blob JSON, non un campo nuovo in `ExtractedValue`,
+   che è contratto congelato) — deliberatamente fuori da questo modulo.
 """
 
 from __future__ import annotations
