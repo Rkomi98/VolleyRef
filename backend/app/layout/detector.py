@@ -230,7 +230,23 @@ class DetectorConfig:
     ink_threshold: float = 0.02
     #: quante finestre candidate al massimo si mandano all'OCR (le migliori per
     #: copertura di inchiostro): tiene limitato il costo su griglie molto fitte
-    max_formation_windows: int = 8
+    max_formation_windows: int = 6
+    #: quante bande di riga scritte provare quando l'etichetta di riga non si
+    #: legge. Nel modulo FIPAV il sestetto è la SECONDA riga di contenuto del
+    #: riquadro set: cercarlo oltre le prime bande scritte è solo costo. È un
+    #: vincolo ordinale sulla griglia, non una coordinata in pixel.
+    max_fallback_rows: int = 4
+    #: quante delle sei celle devono leggersi come numero di maglia valido per
+    #: accettare una finestra come formazione. Backend §25.1: «ogni sestetto
+    #: iniziale deve avere sei posizioni» — quindi il default è 6/6. Si scende a
+    #: 5/6 solo quando la riga è stata ancorata all'etichetta stampata sul
+    #: modulo, cioè quando esiste una prova indipendente dall'OCR delle cifre.
+    #: Senza questo vincolo un riquadro di un set NON GIOCATO produce candidati
+    #: inventati leggendo la numerazione prestampata delle colonne dei punti.
+    min_valid_cells_with_label: int = 5
+    min_valid_cells_without_label: int = 6
+    #: confidence media minima delle celle valide di una finestra
+    min_formation_confidence: float = 0.45
 
 
 class LayoutDetector:
@@ -703,17 +719,17 @@ class LayoutDetector:
             region.meta["starting_six"] = "no_ink"
             return []
 
-        def score(row: int, window: tuple[int, int]) -> tuple[float, list[tuple[str, float]]]:
+        def score(row: int, window: tuple[int, int]) -> tuple[int, float]:
+            """(numero di celle lette come numero di maglia, confidence media)."""
+
             readings: list[tuple[str, float]] = []
             for col in range(window[0], window[1] + 1):
                 rect = region.absolute(_inset(grid.cell(row, col), self.config.cell_inset_frac))
                 readings.append(cell_reader(page.crop(*rect)))
             valid = [(v, c) for v, c in readings if v and validator(v)]
             if not valid:
-                return 0.0, readings
-            coverage = len(valid) / 6.0
-            mean_conf = float(np.mean([c for _v, c in valid]))
-            return coverage * coverage * mean_conf, readings
+                return 0, 0.0
+            return len(valid), float(np.mean([c for _v, c in valid]))
 
         row = self._label_row(page, region, self._STARTING_SIX_LABEL)
         row_source = "label"
@@ -722,24 +738,29 @@ class LayoutDetector:
             # è più probabile che l'etichetta sia scivolata di una banda che il
             # contrario, quindi si torna al criterio numerico.
             row = None
+        min_valid = (
+            self.config.min_valid_cells_with_label
+            if row is not None
+            else self.config.min_valid_cells_without_label
+        )
         if row is None:
             row_source = "numeric_fallback"
-            best_row: tuple[float, int] | None = None
-            for candidate_row in ink_rows:
-                best_here = max((score(candidate_row, w)[0] for w in windows), default=0.0)
-                if best_here >= 0.90:  # 6/6 celle valide e confidence alta
+            best_row: tuple[tuple[int, float], int] | None = None
+            for candidate_row in ink_rows[: self.config.max_fallback_rows]:
+                best_here = max((score(candidate_row, w) for w in windows), default=(0, 0.0))
+                if best_here[0] >= min_valid and best_here[1] >= self.config.min_formation_confidence:
                     best_row = (best_here, candidate_row)
                     break
-                if best_here > 0 and (best_row is None or best_here > best_row[0]):
+                if best_row is None or best_here > best_row[0]:
                     best_row = (best_here, candidate_row)
             if best_row is None:
                 return []
             row = best_row[1]
 
-        scored = sorted(((score(row, w)[0], w) for w in windows), key=lambda t: -t[0])
+        scored = sorted(((score(row, w), w) for w in windows), key=lambda t: (-t[0][0], -t[0][1]))
         chosen: list[tuple[int, int]] = []
-        for value, window in scored:
-            if value <= 0.0:
+        for (valid, confidence), window in scored:
+            if valid < min_valid or confidence < self.config.min_formation_confidence:
                 continue
             if any(not (window[1] < c[0] or window[0] > c[1]) for c in chosen):
                 continue  # sovrapposta a una già scelta
@@ -747,6 +768,7 @@ class LayoutDetector:
             if len(chosen) == 2:
                 break
         if not chosen:
+            region.meta["starting_six"] = "no_window_met_threshold"
             return []
         chosen.sort(key=lambda w: w[0])
 

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Union
 
+import cv2
 import numpy as np
 import pymupdf
 
@@ -114,12 +115,8 @@ def _pixmap_to_gray(pixmap: pymupdf.Pixmap) -> np.ndarray:
     if pixmap.n == 3:
         # PyMuPDF restituisce RGB (non BGR): la conversione va fatta con i pesi
         # corretti, non con cv2.COLOR_BGR2GRAY, altrimenti R e B si scambiano.
-        import cv2
-
         return cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
     if pixmap.n == 4:
-        import cv2
-
         return cv2.cvtColor(arr, cv2.COLOR_RGBA2GRAY)
     raise ValueError(f"pixmap con {pixmap.n} canali non supportato")
 

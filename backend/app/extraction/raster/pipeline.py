@@ -39,7 +39,6 @@ from app.layout.detector import (
     FieldCell,
     LayoutDetector,
     PageLayout,
-    Region,
     RegionKind,
 )
 from app.models.common import ExtractionMethod, SourceRegion
@@ -62,6 +61,10 @@ _REGION_COLORS: dict[RegionKind, tuple[int, int, int]] = {
     RegionKind.APPROVAL: (120, 120, 120),
     RegionKind.UNKNOWN: (60, 60, 60),
 }
+
+#: Parole prestampate sul modulo che finiscono nel ritaglio del nome squadra
+#: insieme al nome vero e proprio (la cella della fascia titolo le contiene).
+_TEAM_NAME_STOPWORDS = {"SQU", "FINE", "INIZIO", "PUNTI", "LIBERO", "UNDER", "SET"}
 
 _ROLE_COLORS: dict[CellRole, tuple[int, int, int]] = {
     CellRole.STARTING_SIX: (0, 0, 255),
@@ -293,8 +296,8 @@ def _clean_candidates(
         for candidate in candidates:
             tokens = [
                 token
-                for token in re.findall(r"[A-Za-z][A-Za-z'&.\-]*", candidate.value)
-                if len(token) >= 3 and token.upper() not in {"SQU", "FINE", "SQ."}
+                for token in re.findall(r"[A-Za-z]{3,}", candidate.value)
+                if token.upper() not in _TEAM_NAME_STOPWORDS
             ]
             value = " ".join(tokens).upper().strip()
             if value and value not in seen:
