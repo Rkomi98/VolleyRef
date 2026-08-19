@@ -29,6 +29,33 @@ export interface PdfPageCanvasProps {
 type LoadedDocument = { numPages: number }
 type LoadedPage = { originalWidth: number; originalHeight: number }
 
+/**
+ * react-pdf reloads the document whenever the identity of `options` changes, and a
+ * `useMemo` is not stable enough (double renders, remounts of the lazy chunk), so
+ * one object per distinct configuration is kept here instead.
+ *
+ * `useSystemFonts: false` keeps rendering identical on every machine instead of
+ * depending on locally installed fonts, and `useWasm: false` keeps pdf.js on its
+ * JS decoders since no wasm assets are served.
+ */
+const optionsCache = new Map<string, Record<string, unknown>>()
+
+function documentOptions(cMapUrl?: string, standardFontDataUrl?: string): Record<string, unknown> {
+  const key = `${cMapUrl ?? ""}|${standardFontDataUrl ?? ""}`
+  const cached = optionsCache.get(key)
+  if (cached) return cached
+  const options: Record<string, unknown> = {
+    useSystemFonts: false,
+    useWasm: false,
+    ...(cMapUrl ? { cMapUrl, cMapPacked: true } : {}),
+    ...(standardFontDataUrl
+      ? { standardFontDataUrl }
+      : { StandardFontDataFactory: BundledStandardFontDataFactory }),
+  }
+  optionsCache.set(key, options)
+  return options
+}
+
 function Notice({ children, tone = "muted" }: { children: React.ReactNode; tone?: "muted" | "danger" }) {
   return (
     <div
@@ -69,17 +96,7 @@ export default function PdfPageCanvas({
   onPageLoad,
   onLoadError,
 }: PdfPageCanvasProps) {
-  const options = React.useMemo(
-    () => ({
-      ...(cMapUrl ? { cMapUrl, cMapPacked: true } : {}),
-      useSystemFonts: false,
-      useWasm: false,
-      ...(standardFontDataUrl
-        ? { standardFontDataUrl }
-        : { StandardFontDataFactory: BundledStandardFontDataFactory }),
-    }),
-    [cMapUrl, standardFontDataUrl]
-  )
+  const options = documentOptions(cMapUrl, standardFontDataUrl)
 
   const height = pageAspectRatio && pageAspectRatio > 0 ? Math.round(width * pageAspectRatio) : undefined
 
@@ -129,6 +146,7 @@ export default function PdfPageCanvas({
           error={<Notice tone="danger">Impossibile disegnare questa pagina.</Notice>}
           noData={<Notice>Pagina non disponibile.</Notice>}
         />
+        {children}
         {isRendering ? (
           <div
             style={{
@@ -144,7 +162,6 @@ export default function PdfPageCanvas({
             <Notice>Rendering della pagina…</Notice>
           </div>
         ) : null}
-        {children}
       </div>
     </Document>
   )

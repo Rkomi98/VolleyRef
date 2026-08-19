@@ -132,58 +132,78 @@ export function PdfViewer({
   cMapUrl,
   standardFontDataUrl,
 }: PdfViewerProps) {
-  const viewer = usePdfViewerState({
+  const [reloadToken, setReloadToken] = React.useState(0)
+  const [failure, setFailure] = React.useState<{ documentKey: string; error: Error } | null>(null)
+
+  const file = pdfUrl ?? null
+  const documentKey = `${typeof file === "string" ? file : file ? "inline-source" : "none"}#${reloadToken}`
+
+  const {
+    containerRef,
+    pageNumber,
+    pageCount,
+    setPageCount,
+    goToPage,
+    goToPreviousPage,
+    goToNextPage,
+    canGoBack,
+    canGoForward,
+    naturalPageSize,
+    setNaturalPageSize,
+    renderWidth,
+    zoom,
+    isFitToWidth,
+    zoomIn,
+    zoomOut,
+    resetZoom,
+    fitToWidth,
+    canZoomIn,
+    canZoomOut,
+    showOverlay: overlayVisible,
+    toggleOverlay,
+    fullscreen,
+    toggleFullscreen,
+  } = usePdfViewerState({
+    documentKey,
     page: currentPage,
     onPageChange,
     showOverlay,
     onShowOverlayChange,
   })
-  const [error, setError] = React.useState<Error | null>(null)
-  const [reloadToken, setReloadToken] = React.useState(0)
 
-  const file = React.useMemo<PdfSource | null>(() => pdfUrl ?? null, [pdfUrl])
-
-  const isFirstDocument = React.useRef(true)
-  React.useEffect(() => {
-    setError(null)
-    viewer.setPageCount(null)
-    viewer.setNaturalPageSize(null)
-    if (isFirstDocument.current) {
-      isFirstDocument.current = false
-      return
-    }
-    viewer.goToPage(1)
-  }, [file, reloadToken, viewer.setPageCount, viewer.setNaturalPageSize, viewer.goToPage])
+  // Scoped to the document it came from, so switching or retrying clears it
+  // without an effect.
+  const error = failure && failure.documentKey === documentKey ? failure.error : null
 
   const selectedRegion = React.useMemo(
     () => (selectedRegionId ? regions.find((region) => region.id === selectedRegionId) ?? null : null),
     [regions, selectedRegionId]
   )
 
-  const { goToPage, pageNumber, pageCount } = viewer
   React.useEffect(() => {
-    if (!selectedRegion || !Number.isFinite(selectedRegion.page)) return
-    if (selectedRegion.page < 1) return
-    if (pageCount != null && selectedRegion.page > pageCount) return
+    // Waits for the page count: following a region into a page the document does
+    // not have would make pdf.js reject the render.
+    if (pageCount == null || !selectedRegion || !Number.isFinite(selectedRegion.page)) return
+    if (selectedRegion.page < 1 || selectedRegion.page > pageCount) return
     if (selectedRegion.page !== pageNumber) goToPage(selectedRegion.page)
   }, [selectedRegion, pageNumber, pageCount, goToPage])
 
   const handleLoadError = React.useCallback(
     (loadError: Error) => {
-      setError(loadError)
+      setFailure({ documentKey, error: loadError })
       onLoadError?.(loadError)
     },
-    [onLoadError]
+    [documentKey, onLoadError]
   )
 
   const regionsOnPage = React.useMemo(
-    () => drawableRegions(regions, viewer.pageNumber).length,
-    [regions, viewer.pageNumber]
+    () => drawableRegions(regions, pageNumber).length,
+    [regions, pageNumber]
   )
 
   const aspectRatio =
-    viewer.naturalPageSize && viewer.naturalPageSize.width > 0
-      ? viewer.naturalPageSize.height / viewer.naturalPageSize.width
+    naturalPageSize && naturalPageSize.width > 0
+      ? naturalPageSize.height / naturalPageSize.width
       : null
 
   return (
@@ -194,35 +214,35 @@ export function PdfViewer({
         height: "100%",
         minHeight: 0,
         background: "var(--neutral-100)",
-        ...(viewer.fullscreen ? { position: "fixed", inset: 0, zIndex: 300 } : {}),
+        ...(fullscreen ? { position: "fixed", inset: 0, zIndex: 300 } : {}),
       }}
     >
       <PdfToolbar
-        pageNumber={viewer.pageNumber}
-        pageCount={viewer.pageCount}
-        onPreviousPage={viewer.goToPreviousPage}
-        onNextPage={viewer.goToNextPage}
-        canGoBack={viewer.canGoBack}
-        canGoForward={viewer.canGoForward}
-        zoom={viewer.zoom}
-        onZoomIn={viewer.zoomIn}
-        onZoomOut={viewer.zoomOut}
-        onResetZoom={viewer.resetZoom}
-        onFitToWidth={viewer.fitToWidth}
-        isFitToWidth={viewer.isFitToWidth}
-        canZoomIn={viewer.canZoomIn}
-        canZoomOut={viewer.canZoomOut}
-        showOverlay={viewer.showOverlay}
-        onToggleOverlay={viewer.toggleOverlay}
+        pageNumber={pageNumber}
+        pageCount={pageCount}
+        onPreviousPage={goToPreviousPage}
+        onNextPage={goToNextPage}
+        canGoBack={canGoBack}
+        canGoForward={canGoForward}
+        zoom={zoom}
+        onZoomIn={zoomIn}
+        onZoomOut={zoomOut}
+        onResetZoom={resetZoom}
+        onFitToWidth={fitToWidth}
+        isFitToWidth={isFitToWidth}
+        canZoomIn={canZoomIn}
+        canZoomOut={canZoomOut}
+        showOverlay={overlayVisible}
+        onToggleOverlay={toggleOverlay}
         regionCount={regionsOnPage}
-        fullscreen={viewer.fullscreen}
-        onToggleFullscreen={viewer.toggleFullscreen}
-        onHidePanel={viewer.fullscreen ? null : onHidePanel}
+        fullscreen={fullscreen}
+        onToggleFullscreen={toggleFullscreen}
+        onHidePanel={fullscreen ? null : onHidePanel}
         disabled={!file}
       />
 
       <div
-        ref={viewer.containerRef}
+        ref={containerRef}
         style={{
           flex: 1,
           minHeight: 0,
@@ -267,26 +287,26 @@ export function PdfViewer({
               Riprova
             </Button>
           </div>
-        ) : viewer.renderWidth == null ? (
+        ) : renderWidth == null ? (
           <CenteredNotice>Preparazione del referto…</CenteredNotice>
         ) : (
           <PdfPageCanvas
             key={reloadToken}
             file={file}
-            pageNumber={viewer.pageNumber}
-            width={viewer.renderWidth}
+            pageNumber={pageNumber}
+            width={renderWidth}
             pageAspectRatio={aspectRatio}
             cMapUrl={cMapUrl}
             standardFontDataUrl={standardFontDataUrl}
-            onDocumentLoad={viewer.setPageCount}
-            onPageLoad={viewer.setNaturalPageSize}
+            onDocumentLoad={setPageCount}
+            onPageLoad={setNaturalPageSize}
             onLoadError={handleLoadError}
           >
             <RegionOverlay
               regions={regions}
-              page={viewer.pageNumber}
+              page={pageNumber}
               selectedRegionId={selectedRegionId}
-              visible={viewer.showOverlay}
+              visible={overlayVisible}
               onRegionClick={onRegionClick}
               onRegionHover={onRegionHover}
               regionLabel={regionLabel}

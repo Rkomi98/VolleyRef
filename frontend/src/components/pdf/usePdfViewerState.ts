@@ -13,6 +13,11 @@ const RESIZE_DEBOUNCE_MS = 150
 export type PageSize = { width: number; height: number }
 
 export interface UsePdfViewerStateOptions {
+  /**
+   * Identifies the open document. Page number, page count and measured page size
+   * are scoped to it, so a new key starts again from page 1 with nothing measured.
+   */
+  documentKey?: string
   page?: number | null
   onPageChange?: (page: number) => void
   initialPage?: number
@@ -46,7 +51,12 @@ export interface PdfViewerState {
   toggleOverlay: () => void
   fullscreen: boolean
   toggleFullscreen: () => void
-  exitFullscreen: () => void
+}
+
+type DocumentState = {
+  key: string
+  pageCount: number | null
+  naturalPageSize: PageSize | null
 }
 
 function clampPage(page: number, pageCount: number | null): number {
@@ -56,13 +66,8 @@ function clampPage(page: number, pageCount: number | null): number {
 }
 
 function nextZoomStep(current: number, direction: 1 | -1): number {
-  if (direction === 1) {
-    const found = ZOOM_STEPS.find((step) => step > current + 0.001)
-    return found ?? MAX_ZOOM
-  }
-  const reversed = [...ZOOM_STEPS].reverse()
-  const found = reversed.find((step) => step < current - 0.001)
-  return found ?? MIN_ZOOM
+  if (direction === 1) return ZOOM_STEPS.find((step) => step > current + 0.001) ?? MAX_ZOOM
+  return [...ZOOM_STEPS].reverse().find((step) => step < current - 0.001) ?? MIN_ZOOM
 }
 
 /**
@@ -72,6 +77,7 @@ function nextZoomStep(current: number, direction: 1 | -1): number {
  */
 export function usePdfViewerState(options: UsePdfViewerStateOptions = {}): PdfViewerState {
   const {
+    documentKey = "",
     page,
     onPageChange,
     initialPage = 1,
@@ -82,16 +88,31 @@ export function usePdfViewerState(options: UsePdfViewerStateOptions = {}): PdfVi
 
   const containerRef = React.useRef<HTMLDivElement | null>(null)
   const [containerWidth, setContainerWidth] = React.useState(0)
-  const [uncontrolledPage, setUncontrolledPage] = React.useState(() => clampPage(initialPage, null))
-  const [pageCount, setPageCountState] = React.useState<number | null>(null)
-  const [naturalPageSize, setNaturalPageSizeState] = React.useState<PageSize | null>(null)
-  const [zoom, setZoom] = React.useState(1)
-  const [isFitToWidth, setIsFitToWidth] = React.useState(true)
+  const [pageState, setPageState] = React.useState(() => ({
+    key: documentKey,
+    page: clampPage(initialPage, null),
+  }))
+  const [documentState, setDocumentState] = React.useState<DocumentState>(() => ({
+    key: documentKey,
+    pageCount: null,
+    naturalPageSize: null,
+  }))
+  const [zoomState, setZoomState] = React.useState({ zoom: 1, fitToWidth: true })
   const [uncontrolledShowOverlay, setUncontrolledShowOverlay] = React.useState(initialShowOverlay)
   const [fullscreen, setFullscreen] = React.useState(false)
 
+  // Anything measured on another document is stale rather than reset in an effect.
+  const isCurrentDocument = documentState.key === documentKey
+  const pageCount = isCurrentDocument ? documentState.pageCount : null
+  const naturalPageSize = isCurrentDocument ? documentState.naturalPageSize : null
+
   const isPageControlled = typeof page === "number" && Number.isFinite(page)
-  const pageNumber = clampPage(isPageControlled ? (page as number) : uncontrolledPage, pageCount)
+  const requestedPage = isPageControlled
+    ? (page as number)
+    : pageState.key === documentKey
+      ? pageState.page
+      : 1
+  const pageNumber = clampPage(requestedPage, pageCount)
 
   const isOverlayControlled = typeof showOverlayProp === "boolean"
   const showOverlay = isOverlayControlled ? (showOverlayProp as boolean) : uncontrolledShowOverlay
@@ -102,7 +123,7 @@ export function usePdfViewerState(options: UsePdfViewerStateOptions = {}): PdfVi
     let timeout: ReturnType<typeof setTimeout> | null = null
     setContainerWidth(element.clientWidth)
     // Debounced: every width change restarts the page render, and react-pdf keeps
-    // the canvas hidden until one completes, so thrashing it would show a blank page.
+    // the canvas hidden until one completes, so thrashing it shows a blank page.
     const observer = new ResizeObserver(() => {
       if (timeout) clearTimeout(timeout)
       timeout = setTimeout(() => setContainerWidth(element.clientWidth), RESIZE_DEBOUNCE_MS)
@@ -116,8 +137,7 @@ export function usePdfViewerState(options: UsePdfViewerStateOptions = {}): PdfVi
 
   const availableWidth =
     containerWidth > 0 ? Math.max(containerWidth - PAGE_GUTTER * 2, MIN_RENDER_WIDTH) : 0
-  const naturalWidth =
-    naturalPageSize && naturalPageSize.width > 0 ? naturalPageSize.width : null
+  const naturalWidth = naturalPageSize && naturalPageSize.width > 0 ? naturalPageSize.width : null
 
   const renderWidth =
     availableWidth === 0
@@ -126,81 +146,82 @@ export function usePdfViewerState(options: UsePdfViewerStateOptions = {}): PdfVi
           MAX_RENDER_WIDTH,
           Math.max(
             MIN_RENDER_WIDTH,
-            Math.round(isFitToWidth ? availableWidth : (naturalWidth ?? availableWidth) * zoom)
+            Math.round(
+              zoomState.fitToWidth ? availableWidth : (naturalWidth ?? availableWidth) * zoomState.zoom
+            )
           )
         )
 
-  const effectiveZoom =
-    renderWidth != null && naturalWidth ? renderWidth / naturalWidth : zoom
+  const zoom = renderWidth != null && naturalWidth ? renderWidth / naturalWidth : zoomState.zoom
 
-  const stateRef = React.useRef({ pageNumber, pageCount, effectiveZoom })
-  stateRef.current = { pageNumber, pageCount, effectiveZoom }
-
-  const setPageCount = React.useCallback((count: number | null) => {
-    setPageCountState((previous) => {
+  const setPageCount = React.useCallback(
+    (count: number | null) => {
       const next = count != null && Number.isFinite(count) && count > 0 ? Math.floor(count) : null
-      return previous === next ? previous : next
-    })
-  }, [])
+      setDocumentState((previous) =>
+        previous.key === documentKey && previous.pageCount === next
+          ? previous
+          : { ...previous, key: documentKey, pageCount: next }
+      )
+    },
+    [documentKey]
+  )
 
-  const setNaturalPageSize = React.useCallback((size: PageSize | null) => {
-    setNaturalPageSizeState((previous) => {
-      if (size == null) return previous == null ? previous : null
-      if (!(size.width > 0) || !(size.height > 0)) return previous
-      if (previous && previous.width === size.width && previous.height === size.height) {
-        return previous
-      }
-      return { width: size.width, height: size.height }
-    })
-  }, [])
+  const setNaturalPageSize = React.useCallback(
+    (size: PageSize | null) => {
+      const next = size && size.width > 0 && size.height > 0 ? { ...size } : null
+      setDocumentState((previous) => {
+        const current = previous.key === documentKey ? previous.naturalPageSize : null
+        if (
+          previous.key === documentKey &&
+          current?.width === next?.width &&
+          current?.height === next?.height
+        ) {
+          return previous
+        }
+        return { ...previous, key: documentKey, naturalPageSize: next }
+      })
+    },
+    [documentKey]
+  )
 
   const goToPage = React.useCallback(
     (target: number) => {
-      const clamped = clampPage(target, stateRef.current.pageCount)
-      if (clamped === stateRef.current.pageNumber) return
-      if (!isPageControlled) setUncontrolledPage(clamped)
+      const clamped = clampPage(target, pageCount)
+      if (clamped === pageNumber) return
+      if (!isPageControlled) setPageState({ key: documentKey, page: clamped })
       onPageChange?.(clamped)
     },
-    [isPageControlled, onPageChange]
+    [documentKey, isPageControlled, onPageChange, pageCount, pageNumber]
   )
 
-  const goToPreviousPage = React.useCallback(
-    () => goToPage(stateRef.current.pageNumber - 1),
-    [goToPage]
+  const goToPreviousPage = React.useCallback(() => goToPage(pageNumber - 1), [goToPage, pageNumber])
+  const goToNextPage = React.useCallback(() => goToPage(pageNumber + 1), [goToPage, pageNumber])
+
+  const zoomIn = React.useCallback(
+    () => setZoomState({ zoom: nextZoomStep(zoom, 1), fitToWidth: false }),
+    [zoom]
   )
-  const goToNextPage = React.useCallback(
-    () => goToPage(stateRef.current.pageNumber + 1),
-    [goToPage]
+  const zoomOut = React.useCallback(
+    () => setZoomState({ zoom: nextZoomStep(zoom, -1), fitToWidth: false }),
+    [zoom]
   )
-
-  const applyZoom = React.useCallback((direction: 1 | -1) => {
-    setZoom(nextZoomStep(stateRef.current.effectiveZoom, direction))
-    setIsFitToWidth(false)
-  }, [])
-
-  const zoomIn = React.useCallback(() => applyZoom(1), [applyZoom])
-  const zoomOut = React.useCallback(() => applyZoom(-1), [applyZoom])
-
-  const resetZoom = React.useCallback(() => {
-    setZoom(1)
-    setIsFitToWidth(false)
-  }, [])
-
-  const fitToWidth = React.useCallback(() => setIsFitToWidth(true), [])
+  const resetZoom = React.useCallback(() => setZoomState({ zoom: 1, fitToWidth: false }), [])
+  const fitToWidth = React.useCallback(
+    () => setZoomState((previous) => ({ ...previous, fitToWidth: true })),
+    []
+  )
 
   const toggleOverlay = React.useCallback(() => {
     if (isOverlayControlled) {
       onShowOverlayChange?.(!showOverlayProp)
       return
     }
-    setUncontrolledShowOverlay((visible) => {
-      onShowOverlayChange?.(!visible)
-      return !visible
-    })
-  }, [isOverlayControlled, onShowOverlayChange, showOverlayProp])
+    const next = !uncontrolledShowOverlay
+    setUncontrolledShowOverlay(next)
+    onShowOverlayChange?.(next)
+  }, [isOverlayControlled, onShowOverlayChange, showOverlayProp, uncontrolledShowOverlay])
 
   const toggleFullscreen = React.useCallback(() => setFullscreen((value) => !value), [])
-  const exitFullscreen = React.useCallback(() => setFullscreen(false), [])
 
   React.useEffect(() => {
     if (!fullscreen) return
@@ -229,18 +250,17 @@ export function usePdfViewerState(options: UsePdfViewerStateOptions = {}): PdfVi
     naturalPageSize,
     setNaturalPageSize,
     renderWidth,
-    zoom: effectiveZoom,
-    isFitToWidth,
+    zoom,
+    isFitToWidth: zoomState.fitToWidth,
     zoomIn,
     zoomOut,
     resetZoom,
     fitToWidth,
-    canZoomIn: effectiveZoom < MAX_ZOOM - 0.001,
-    canZoomOut: effectiveZoom > MIN_ZOOM + 0.001,
+    canZoomIn: zoom < MAX_ZOOM - 0.001,
+    canZoomOut: zoom > MIN_ZOOM + 0.001,
     showOverlay,
     toggleOverlay,
     fullscreen,
     toggleFullscreen,
-    exitFullscreen,
   }
 }

@@ -53,7 +53,7 @@ export function PdfViewerDemo({ initialPdfUrl = null }: { initialPdfUrl?: string
           <button type="button" onClick={() => setPdfUrl(null)} style={{ fontSize: 13, cursor: "pointer" }}>
             Nessun PDF
           </button>
-          <button type="button" onClick={() => setPdfUrl("/pdf-dev/does-not-exist.pdf")} style={{ fontSize: 13, cursor: "pointer" }}>
+          <button type="button" onClick={() => setPdfUrl("/referto-inesistente.pdf")} style={{ fontSize: 13, cursor: "pointer" }}>
             URL non valido
           </button>
           <button type="button" onClick={() => setPdfUrl(initialPdfUrl)} style={{ fontSize: 13, cursor: "pointer" }}>
