@@ -11,7 +11,7 @@ REPOSITORY_ROOT = BACKEND_DIR.parent
 
 
 def test_vercel_container_uses_routed_port_and_writable_scratch_space() -> None:
-    dockerfile = (BACKEND_DIR / "Dockerfile").read_text()
+    dockerfile = (BACKEND_DIR / "Dockerfile.vercel").read_text()
 
     # Vercel routes container traffic to port 80 when PORT is not configured.
     assert "${PORT:-80}" in dockerfile
