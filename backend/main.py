@@ -11,31 +11,22 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from app.api.analyses import router as analyses_router
 from app.core.config import get_settings
-from app.models.common import ErrorCode, ErrorDetail, ErrorEnvelope
+from app.core.errors import register_exception_handlers
+from app.core.logging import configure_logging
 from app.repositories.analysis_repository import (
     SqliteAnalysisRepository,
     create_engine_from_url,
     create_session_factory,
     create_tables,
 )
-from app.services.analysis_service import AnalysisService, AnalysisServiceError
+from app.services.analysis_service import AnalysisService
 
-# Mappatura ErrorCode -> HTTP status (backend §34).
-_ERROR_STATUS_MAP: dict[ErrorCode, int] = {
-    ErrorCode.ANALYSIS_NOT_FOUND: 404,
-    ErrorCode.INVALID_FILE: 400,
-    ErrorCode.UNSUPPORTED_PDF: 400,
-    ErrorCode.INVALID_FIELD_VALUE: 400,
-    ErrorCode.ANALYSIS_FAILED: 500,
-    ErrorCode.EXPORT_FAILED: 500,
-    ErrorCode.INTERNAL_ERROR: 500,
-}
+configure_logging()
 
 
 @asynccontextmanager
@@ -67,28 +58,13 @@ app.add_middleware(
 
 app.include_router(analyses_router)
 
-
-@app.exception_handler(AnalysisServiceError)
-async def handle_analysis_service_error(
-    request: Request, exc: AnalysisServiceError
-) -> JSONResponse:
-    status_code = _ERROR_STATUS_MAP.get(exc.code, 500)
-    envelope = ErrorEnvelope(
-        error=ErrorDetail(code=exc.code, message=exc.message, details=exc.details)
-    )
-    return JSONResponse(status_code=status_code, content=envelope.model_dump(mode="json"))
-
-
-@app.exception_handler(Exception)
-async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
-    envelope = ErrorEnvelope(
-        error=ErrorDetail(
-            code=ErrorCode.INTERNAL_ERROR,
-            message="Errore interno del server.",
-            details={},
-        )
-    )
-    return JSONResponse(status_code=500, content=envelope.model_dump(mode="json"))
+# Handler centralizzato per tutte le eccezioni note, su tutte le route
+# (backend §34): AppError/errori di validazione file (app/core/security.py),
+# AnalysisServiceError e sottoclassi (app/services/analysis_service.py),
+# RequestValidationError e HTTPException — vedi app/core/errors.py per il
+# dettaglio del dispatch e per il motivo per cui non esiste un vero
+# catch-all su `Exception` (limite di Starlette, non di questo modulo).
+register_exception_handlers(app)
 
 
 @app.get("/health", include_in_schema=False)

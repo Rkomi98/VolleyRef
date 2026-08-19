@@ -14,8 +14,12 @@ from typing import Any, Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, Request, Response, UploadFile
 from pydantic import BaseModel
 
+from app.export.csv import build_csv
+from app.export.xlsx import build_xlsx
+from app.core.security import validate_pdf_upload
 from app.models.analysis import Analysis, AnalysisStatusResponse, CreateAnalysisResponse
 from app.services.analysis_service import AnalysisService
+from app.services.field_update import FieldUpdateService, get_field_update_service
 
 router = APIRouter(prefix="/api/v1/analyses", tags=["analyses"])
 
@@ -39,6 +43,9 @@ async def create_analysis(
     service: AnalysisService = Depends(get_analysis_service),
 ) -> CreateAnalysisResponse:
     content = await file.read()
+    validate_pdf_upload(
+        filename=file.filename, content_type=file.content_type, content=content
+    )
     return await service.create_analysis(
         filename=file.filename,
         content_type=file.content_type,
@@ -66,14 +73,14 @@ def patch_field(
     analysis_id: str,
     field_id: str,
     body: FieldUpdateRequest,
-    service: AnalysisService = Depends(get_analysis_service),
+    service: FieldUpdateService = Depends(get_field_update_service),
 ) -> Analysis:
     return service.patch_field(analysis_id, field_id, body.value)
 
 
 @router.post("/{analysis_id}/reset-corrections", response_model=Analysis)
 def reset_corrections(
-    analysis_id: str, service: AnalysisService = Depends(get_analysis_service)
+    analysis_id: str, service: FieldUpdateService = Depends(get_field_update_service)
 ) -> Analysis:
     return service.reset_corrections(analysis_id)
 
@@ -82,7 +89,7 @@ def reset_corrections(
 def reanalyze(
     analysis_id: str,
     background_tasks: BackgroundTasks,
-    service: AnalysisService = Depends(get_analysis_service),
+    service: FieldUpdateService = Depends(get_field_update_service),
 ) -> Response:
     service.reanalyze(analysis_id, background_tasks)
     return Response(status_code=202)
@@ -92,7 +99,8 @@ def reanalyze(
 def export_xlsx(
     analysis_id: str, service: AnalysisService = Depends(get_analysis_service)
 ) -> Response:
-    content = service.export_xlsx(analysis_id)
+    analysis = service.get_analysis(analysis_id)
+    content = build_xlsx(analysis)
     return Response(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -108,7 +116,8 @@ def export_csv(
     dataset: str = Query(...),
     service: AnalysisService = Depends(get_analysis_service),
 ) -> Response:
-    content = service.export_csv(analysis_id, dataset)
+    analysis = service.get_analysis(analysis_id)
+    content = build_csv(analysis, dataset)
     return Response(
         content=content,
         media_type="text/csv",
