@@ -3,20 +3,12 @@
     "frontend": {
       "root": "frontend",
       "framework": "nextjs"
-    },
-    "backend": {
-      "root": "backend",
-      "runtime": "container",
-      "entrypoint": "Dockerfile.vercel"
     }
   },
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": {
-        "type": "service",
-        "service": "backend"
-      }
+      "destination": "https://volleyref.onrender.com/api/$1"
     },
     {
       "source": "/(.*)",
