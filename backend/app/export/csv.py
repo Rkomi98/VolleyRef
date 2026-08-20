@@ -11,8 +11,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-import pandas as pd
-
 from app.models.analysis import Analysis, AnalysisGlobalStatus
 from app.models.match import ServiceTurn
 from app.services.analysis_service import ExportFailedError
@@ -101,6 +99,13 @@ def build_csv(analysis: Analysis, dataset: str) -> str:
     """
 
     _require_ready(analysis)
+
+    # Import lazy: `pandas` pesa ~50-70MB residenti e serve solo qui, sul
+    # percorso di export (raro). Importarlo all'avvio del modulo — che è nella
+    # catena di import di `main` via il router — terrebbe quella memoria
+    # occupata per tutta la vita del processo, riducendo il margine disponibile
+    # alla pipeline di estrazione su referti scansionati.
+    import pandas as pd
 
     if dataset == "starting-six":
         frame = pd.DataFrame(_starting_six_rows(analysis), columns=_STARTING_SIX_COLUMNS)

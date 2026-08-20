@@ -41,7 +41,12 @@ async def lifespan(app: FastAPI):
     session_factory = create_session_factory(engine)
     repository = SqliteAnalysisRepository(session_factory)
 
-    app.state.analysis_service = AnalysisService(repository, storage_dir)
+    service = AnalysisService(repository, storage_dir)
+    # Riconciliazione all'avvio: chiude come FAILED le analisi rimaste
+    # PROCESSING/UPLOADED da un processo precedente morto a metà (es. OOM su un
+    # referto scansionato), così che il polling del frontend non giri all'infinito.
+    service.fail_unfinished_analyses()
+    app.state.analysis_service = service
     yield
 
 

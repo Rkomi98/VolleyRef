@@ -321,14 +321,25 @@ class LayoutDetector:
 
         cfg = self.config
         h, w = page.image.shape[:2]
+        # A 300dpi una pagina A3 è ~17 megapixel: ognuno di questi array pesa
+        # ~17MB. Li liberiamo appena diventano inutili (`del`), così il picco di
+        # memoria è di ~2-3 buffer alla volta e non di tutti e cinque insieme —
+        # decisivo per non superare il tetto di RAM del backend su un referto
+        # scansionato. Nessuna operazione cv2 cambia: cambia solo *quando* la
+        # memoria viene restituita.
         binary = self._binarize(page.image)
         horizontal, vertical = self._line_masks(binary)
+        del binary  # le linee vivono ormai nelle due maschere
+        combined = cv2.bitwise_or(horizontal, vertical)
+        del horizontal, vertical
         # La dilatazione ricongiunge gli angoli dei rettangoli, dove le due
         # maschere non si toccano per un paio di pixel: senza di essa il
         # findContours restituisce quattro segmenti invece di un riquadro.
-        grid = cv2.dilate(cv2.bitwise_or(horizontal, vertical), np.ones((3, 3), np.uint8), 2)
+        grid = cv2.dilate(combined, np.ones((3, 3), np.uint8), 2)
+        del combined
 
         contours, _ = cv2.findContours(grid, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        del grid
         boxes: list[tuple[int, int, int, int]] = []
         min_area = cfg.min_region_area_frac * w * h
         for contour in contours:

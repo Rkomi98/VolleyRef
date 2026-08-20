@@ -126,6 +126,15 @@ class AnalysisRepository(ABC):
     def reset_for_reanalysis(self, analysis_id: str, initial_analysis_json: dict) -> None:
         """Riporta il record allo stato iniziale prima di rilanciare la pipeline."""
 
+    @abstractmethod
+    def fail_unfinished(self, *, error: dict) -> int:
+        """Marca FAILED ogni analisi in uno stato non terminale (UPLOADED/
+        PROCESSING) e vi scrive `error`. Ritorna quante ne sono state chiuse.
+
+        Serve alla riconciliazione all'avvio: dopo un riavvio del processo
+        nessun BackgroundTask precedente è più vivo, quindi un'analisi non
+        terminale è di fatto interrotta."""
+
 
 class SqliteAnalysisRepository(AnalysisRepository):
     """Implementazione SQLite/SQLAlchemy dell'interfaccia sopra."""
@@ -228,6 +237,27 @@ class SqliteAnalysisRepository(AnalysisRepository):
             row.error_json = None
             row.analysis_json = json.dumps(initial_analysis_json)
             session.commit()
+
+    def fail_unfinished(self, *, error: dict) -> int:
+        from sqlalchemy import select
+
+        terminal_error = json.dumps(error)
+        with self._session_factory() as session:
+            rows = (
+                session.execute(
+                    select(AnalysisModel).where(
+                        AnalysisModel.status.in_(["UPLOADED", "PROCESSING"])
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for row in rows:
+                row.status = "FAILED"
+                row.current_step = None
+                row.error_json = terminal_error
+            session.commit()
+            return len(rows)
 
 
 def create_engine_from_url(database_url: str) -> Engine:

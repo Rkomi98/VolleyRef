@@ -134,7 +134,15 @@ def render_page(pdf: PdfSource, page_index: int = 0, *, dpi: float = DEFAULT_DPI
             raise IndexError(f"page_index {page_index} fuori range (pagine: {doc.page_count})")
         page = doc[page_index]
         zoom = dpi / PDF_DPI
-        pixmap = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+        # Rasterizziamo DIRETTAMENTE in scala di grigi (`csGRAY`): l'immagine
+        # finale usata dalla pipeline è comunque a un canale (vedi invariante 1
+        # nel docstring del modulo), quindi chiedere a MuPDF un pixmap grayscale
+        # invece del default RGB fa risparmiare ~2/3 della memoria del buffer
+        # (una pagina A3 a 300dpi passa da ~52MB RGB a ~17MB) e salta del tutto
+        # la conversione `cv2.cvtColor` — a parità esatta di pixel prodotti.
+        pixmap = page.get_pixmap(
+            matrix=pymupdf.Matrix(zoom, zoom), alpha=False, colorspace=pymupdf.csGRAY
+        )
         return RenderedPage(
             page_index=page_index,
             dpi=dpi,

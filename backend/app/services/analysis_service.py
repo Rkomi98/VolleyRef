@@ -631,6 +631,23 @@ class AnalysisService:
     # -- pipeline -----------------------------------------------------------
 
     async def _run_pipeline(self, analysis_id: str) -> None:
+        try:
+            await self._run_pipeline_steps(analysis_id)
+        except Exception as exc:  # noqa: BLE001 - qualunque errore ⇒ stato terminale
+            # Rete di sicurezza: se qualcosa qui alza (errore di storage, bug non
+            # previsto, ecc.) l'analisi NON deve restare bloccata su PROCESSING —
+            # sarebbe uno spinner infinito lato frontend, che fa polling finché lo
+            # stato non è terminale. La marchiamo FAILED con un messaggio leggibile.
+            # NB: un OOM (SIGKILL) non è catturabile qui — quel caso è coperto
+            # dalla riconciliazione all'avvio (`fail_unfinished_analyses`).
+            _logger.error(
+                "pipeline fallita in modo non gestito, analisi marcata FAILED",
+                exc_info=True,
+                extra={"analysis_id": analysis_id, "error_type": type(exc).__name__},
+            )
+            self._mark_failed(analysis_id, f"{type(exc).__name__}: {exc}")
+
+    async def _run_pipeline_steps(self, analysis_id: str) -> None:
         total_steps = len(_STEP_ORDER)
         analysis: Optional[Analysis] = None
         for index in range(total_steps):
@@ -674,6 +691,57 @@ class AnalysisService:
             current_step=None,
             steps=_steps_snapshot(completed_up_to=total_steps, processing_index=None),
         )
+
+    def _mark_failed(self, analysis_id: str, reason: str) -> None:
+        """Porta l'analisi allo stato terminale FAILED con un errore leggibile.
+
+        Conserva progress/steps già raggiunti (utile a chi guarda a che punto si
+        è interrotta) ma azzera `current_step` e imposta un `ErrorDetail`
+        `ANALYSIS_FAILED`, che il frontend mostra nel riquadro d'errore."""
+
+        record = self._repository.get(analysis_id)
+        self._repository.update_progress(
+            analysis_id,
+            status=AnalysisGlobalStatus.FAILED.value,
+            progress=record.progress if record else 0,
+            current_step=None,
+            steps=record.steps if record else _steps_snapshot(0, None),
+            error={
+                "code": ErrorCode.ANALYSIS_FAILED.value,
+                "message": (
+                    "L'analisi del referto non è riuscita. Riprova; se il problema "
+                    "persiste, il documento potrebbe non essere leggibile."
+                ),
+                "details": {"reason": reason},
+            },
+        )
+
+    def fail_unfinished_analyses(self) -> int:
+        """Marca FAILED le analisi rimaste non terminali da un processo morto.
+
+        I task di estrazione girano in-process (FastAPI BackgroundTasks): se il
+        processo viene ucciso mentre elabora — tipicamente un OOM su un referto
+        scansionato pesante — lo stato resta congelato su UPLOADED/PROCESSING e
+        il polling del frontend non finirebbe mai. All'avvio nessun task del
+        processo precedente è più vivo, quindi ogni analisi non terminale è, di
+        fatto, fallita: la si chiude con un errore esplicito così che il client
+        smetta di girare a vuoto e possa proporre "Riprova"."""
+
+        error = {
+            "code": ErrorCode.ANALYSIS_FAILED.value,
+            "message": (
+                "L'elaborazione si è interrotta perché il servizio è stato "
+                "riavviato durante l'analisi. Riprova l'analisi del referto."
+            ),
+            "details": {"reason": "process-restart"},
+        }
+        count = self._repository.fail_unfinished(error=error)
+        if count:
+            _logger.warning(
+                "analisi non terminate marcate FAILED all'avvio",
+                extra={"count": count},
+            )
+        return count
 
     # -- scelta fra pipeline reale e fallback canned -------------------------
 
