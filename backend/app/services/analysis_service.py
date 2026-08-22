@@ -22,7 +22,7 @@ import os
 import random
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import BackgroundTasks
 
@@ -118,7 +118,8 @@ class ExportFailedError(AnalysisServiceError):
 
 
 # --------------------------------------------------------------------------
-# Pipeline mock: 5 step, nell'ordine esatto di ProcessingStepId (backend §6).
+# I cinque step sono il contratto dell'API.  La pipeline reale pubblica i loro
+# avanzamenti mentre lavora, senza delay che simulino il progresso.
 # --------------------------------------------------------------------------
 
 _STEP_ORDER: list[ProcessingStepId] = [
@@ -128,9 +129,6 @@ _STEP_ORDER: list[ProcessingStepId] = [
     ProcessingStepId.EXTRACT_SERVICE_TURNS,
     ProcessingStepId.VALIDATE,
 ]
-
-_STEP_DELAY_SECONDS = 0.3
-
 
 def _steps_snapshot(
     completed_up_to: int, processing_index: Optional[int]
@@ -648,37 +646,17 @@ class AnalysisService:
             self._mark_failed(analysis_id, f"{type(exc).__name__}: {exc}")
 
     async def _run_pipeline_steps(self, analysis_id: str) -> None:
-        total_steps = len(_STEP_ORDER)
-        analysis: Optional[Analysis] = None
-        for index in range(total_steps):
-            progress_processing = int(round((index / total_steps) * 100))
-            self._repository.update_progress(
-                analysis_id,
-                status=AnalysisGlobalStatus.PROCESSING.value,
-                progress=progress_processing,
-                current_step=_STEP_ORDER[index].value,
-                steps=_steps_snapshot(completed_up_to=index, processing_index=index),
-            )
-            if _STEP_ORDER[index] is ProcessingStepId.READ_DOCUMENT:
-                # Il lavoro vero (rendering, OCR, parsing) è sincrono e può
-                # durare decine di secondi sul percorso raster: va fuori dal
-                # loop asyncio, altrimenti il polling di `GET .../status`
-                # resterebbe bloccato per tutta la durata dell'estrazione.
-                analysis = await asyncio.to_thread(self._produce_analysis, analysis_id)
-            else:
-                await asyncio.sleep(_STEP_DELAY_SECONDS)
-
-            progress_completed = int(round(((index + 1) / total_steps) * 100))
-            self._repository.update_progress(
-                analysis_id,
-                status=AnalysisGlobalStatus.PROCESSING.value,
-                progress=progress_completed,
-                current_step=_STEP_ORDER[index].value,
-                steps=_steps_snapshot(completed_up_to=index + 1, processing_index=None),
-            )
-
-        if analysis is None:  # pragma: no cover - difensivo
-            analysis = self._canned_fallback(analysis_id, "pipeline non eseguita")
+        # The extraction is synchronous and can take tens of seconds for a
+        # scanned report.  It runs in a worker thread so status polling stays
+        # responsive; its callback writes truthful OCR/raster milestones.
+        self._publish_pipeline_progress(analysis_id, "inspect_document", None, None)
+        analysis = await asyncio.to_thread(
+            self._produce_analysis,
+            analysis_id,
+            lambda stage, completed=None, total=None: self._publish_pipeline_progress(
+                analysis_id, stage, completed, total
+            ),
+        )
         self._repository.save_result(
             analysis_id,
             status=AnalysisGlobalStatus.READY.value,
@@ -689,7 +667,78 @@ class AnalysisService:
             status=AnalysisGlobalStatus.READY.value,
             progress=100,
             current_step=None,
-            steps=_steps_snapshot(completed_up_to=total_steps, processing_index=None),
+            steps=_steps_snapshot(completed_up_to=len(_STEP_ORDER), processing_index=None),
+        )
+
+    def _publish_pipeline_progress(
+        self,
+        analysis_id: str,
+        stage: str,
+        completed: Optional[int],
+        total: Optional[int],
+    ) -> None:
+        """Map real extraction milestones onto the stable five-step API.
+
+        ``read_cell`` is the only long stage with an exact unit count, so its
+        percentage is proportional to cells actually OCR'd.  Other values are
+        boundaries between completed pieces of work, never timer-driven UI
+        animation.  A record can only advance: callbacks from nested stages
+        and the final normalisation cannot move the status backwards.
+        """
+
+        # (progress, current step index, number of genuinely finished steps)
+        milestones: dict[str, tuple[int, int, int]] = {
+            "inspect_document": (0, 0, 0),
+            "render_page": (4, 0, 0),
+            "page_rendered": (10, 0, 0),
+            "read_text_layer": (25, 1, 1),
+            "detect_layout": (15, 1, 1),
+            "layout_detected": (30, 1, 1),
+            "collect_cells": (32, 2, 2),
+            "cells_collected": (50, 2, 2),
+            "raster_complete": (85, 3, 3),
+            "parse_sets": (88, 3, 3),
+            "validate": (94, 4, 4),
+            "complete": (99, 4, 4),
+        }
+        if stage == "read_cell":
+            # The denominator is known only once layout has selected the OCR
+            # cells.  This is actual completed OCR work, not elapsed time.
+            fraction = completed / total if total and completed is not None else 0
+            progress, step_index, completed_steps = (50 + int(round(35 * fraction)), 2, 2)
+        elif stage == "probe_cell":
+            # Formation-window probing has no reliable total before the layout
+            # is selected.  It still represents real OCR calls, so expose its
+            # completed work in the reserved 32–49% range without claiming the
+            # cap is a total number of cells.
+            probe_count = completed or 0
+            progress, step_index, completed_steps = (
+                min(49, 32 + probe_count // 10),
+                2,
+                2,
+            )
+        else:
+            milestone = milestones.get(stage)
+            if milestone is None:
+                _logger.warning("milestone estrazione sconosciuta", extra={"stage": stage})
+                return
+            progress, step_index, completed_steps = milestone
+
+        record = self._repository.get(analysis_id)
+        if record is None or progress < record.progress:
+            return
+        # Suppress duplicate writes generated by per-cell callbacks while
+        # retaining every integer percentage advance for polling clients.
+        if progress == record.progress and record.current_step == _STEP_ORDER[step_index].value:
+            return
+        self._repository.update_progress(
+            analysis_id,
+            status=AnalysisGlobalStatus.PROCESSING.value,
+            progress=progress,
+            current_step=_STEP_ORDER[step_index].value,
+            steps=_steps_snapshot(
+                completed_up_to=completed_steps, processing_index=step_index
+            ),
         )
 
     def _mark_failed(self, analysis_id: str, reason: str) -> None:
@@ -745,7 +794,11 @@ class AnalysisService:
 
     # -- scelta fra pipeline reale e fallback canned -------------------------
 
-    def _produce_analysis(self, analysis_id: str) -> Analysis:
+    def _produce_analysis(
+        self,
+        analysis_id: str,
+        progress_callback: Optional[Callable[[str, Optional[int], Optional[int]], None]] = None,
+    ) -> Analysis:
         """Esegue l'estrazione reale sul PDF caricato, con fallback tracciato.
 
         Un PDF non supportato non deve far crashare l'app, ma non deve nemmeno
@@ -754,16 +807,22 @@ class AnalysisService:
         """
 
         if not real_pipeline_enabled():
+            if progress_callback is not None:
+                progress_callback("complete", None, None)
             return self._canned_fallback(
                 analysis_id, f"pipeline reale disabilitata da {REAL_PIPELINE_ENV_VAR}"
             )
 
         record = self._repository.get(analysis_id)
         if record is None or not record.pdf_path:
+            if progress_callback is not None:
+                progress_callback("complete", None, None)
             return self._canned_fallback(analysis_id, "PDF originale non disponibile")
 
         try:
-            result = run_real_pipeline(record.pdf_path, analysis_id)
+            result = run_real_pipeline(
+                record.pdf_path, analysis_id, progress_callback=progress_callback
+            )
         except Exception as exc:  # noqa: BLE001 - qualunque errore ⇒ fallback tracciato
             _logger.error(
                 "estrazione reale fallita, ripiego su dati simulati",
@@ -774,6 +833,8 @@ class AnalysisService:
                     "error_type": type(exc).__name__,
                 },
             )
+            if progress_callback is not None:
+                progress_callback("complete", None, None)
             return self._canned_fallback(analysis_id, f"{type(exc).__name__}: {exc}")
 
         _logger.info(

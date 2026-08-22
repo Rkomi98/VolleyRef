@@ -62,7 +62,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from app.core.logging import get_logger
 from app.domain.raw_observation import ExpectedType, ObservationCandidate, RawObservation
@@ -81,6 +81,21 @@ from app.volleyball.parser import parse_set, worst_status
 from app.volleyball.validator import validate_set
 
 logger = get_logger(__name__)
+
+# Service-agnostic notification emitted while real work is being done.  It is
+# intentionally a tiny primitive contract so command-line callers and tests do
+# not need to know the HTTP status model.
+ProgressCallback = Callable[[str, Optional[int], Optional[int]], None]
+
+
+def _report_progress(
+    callback: Optional[ProgressCallback],
+    stage: str,
+    completed: Optional[int] = None,
+    total: Optional[int] = None,
+) -> None:
+    if callback is not None:
+        callback(stage, completed, total)
 
 TEAM_A_ID = "team-a"
 TEAM_B_ID = "team-b"
@@ -292,10 +307,15 @@ def _read_text_layer(pdf_path: Path) -> DocumentReading:
 # ---------------------------------------------------------------------------
 
 
-def _read_raster(pdf_path: Path, *, debug: bool) -> DocumentReading:
+def _read_raster(
+    pdf_path: Path,
+    *,
+    debug: bool,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> DocumentReading:
     from app.extraction.raster.pipeline import extract_raster
 
-    result = extract_raster(pdf_path, debug=debug)
+    result = extract_raster(pdf_path, debug=debug, progress_callback=progress_callback)
 
     boxes: dict[int, SetBoxReading] = {}
     header_names: dict[str, list[ObservationCandidate]] = {}
@@ -859,7 +879,11 @@ def _debug_enabled() -> bool:
 
 
 def run_real_pipeline(
-    pdf_path: str | Path, analysis_id: str, *, debug: Optional[bool] = None
+    pdf_path: str | Path,
+    analysis_id: str,
+    *,
+    debug: Optional[bool] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> PipelineResult:
     """Estrae `pdf_path` e ne costruisce l'`Analysis` pubblica.
 
@@ -868,15 +892,19 @@ def run_real_pipeline(
     referto senza dati.
     """
 
+    _report_progress(progress_callback, "inspect_document")
     path = Path(pdf_path)
     capabilities = inspect_pdf(path)
     if debug is None:
         debug = _debug_enabled()
 
     if capabilities.has_usable_text_layer:
+        _report_progress(progress_callback, "read_text_layer")
         reading = _read_text_layer(path)
     else:
-        reading = _read_raster(path, debug=bool(debug))
+        reading = _read_raster(
+            path, debug=bool(debug), progress_callback=progress_callback
+        )
 
     logger.info(
         "estrazione completata",
@@ -895,6 +923,7 @@ def run_real_pipeline(
             f"(percorso {reading.method.value})"
         )
 
+    _report_progress(progress_callback, "parse_sets")
     assignment, ambiguous_sets = _assign_slots(played)
     team_names, name_checks = _resolve_team_names(reading, assignment)
 
@@ -908,6 +937,7 @@ def run_real_pipeline(
         for box in played
     ]
 
+    _report_progress(progress_callback, "validate")
     all_checks: list[ValidationCheck] = list(name_checks)
     for set_data in sets:
         all_checks.extend(set_data.validation.checks)
@@ -932,7 +962,7 @@ def run_real_pipeline(
         validation=ValidationResult(status=overall, checks=all_checks),
     )
 
-    return PipelineResult(
+    result = PipelineResult(
         analysis=analysis,
         method=reading.method,
         capabilities=capabilities,
@@ -943,6 +973,8 @@ def run_real_pipeline(
             "ambiguous_sides": ambiguous_sets,
         },
     )
+    _report_progress(progress_callback, "complete")
+    return result
 
 
 def fallback_check(reason: str) -> ValidationCheck:

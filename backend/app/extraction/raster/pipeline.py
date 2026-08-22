@@ -26,7 +26,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 import cv2
 import numpy as np
@@ -46,6 +46,23 @@ from app.models.common import ExtractionMethod, SourceRegion
 from app.ocr.tesseract import TesseractOcr, is_valid_player_number
 
 logger = get_logger(__name__)
+
+# The callback deliberately uses only primitive values: the raster package is
+# also used directly by tests and diagnostic scripts, so it must not depend on
+# the API/service layer.  ``completed``/``total`` are supplied when the amount
+# of OCR work is known (the final cell pass); callers can still use a stage-only
+# milestone for layout and formation probing.
+ProgressCallback = Callable[[str, Optional[int], Optional[int]], None]
+
+
+def _report_progress(
+    callback: Optional[ProgressCallback],
+    stage: str,
+    completed: Optional[int] = None,
+    total: Optional[int] = None,
+) -> None:
+    if callback is not None:
+        callback(stage, completed, total)
 
 #: Directory di default degli artefatti di debug, relativa alla root del backend.
 DEFAULT_DEBUG_ROOT = Path(__file__).resolve().parents[3] / "storage" / "debug"
@@ -153,6 +170,7 @@ def extract_raster(
     debug: bool = True,
     debug_root: Optional[Path] = None,
     run_id: Optional[str] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> RasterExtractionResult:
     """Esegue il percorso raster completo su `pdf_path`.
 
@@ -176,17 +194,26 @@ def extract_raster(
 
     page_indexes = list(pages) if pages is not None else [0]
     for page_index in page_indexes:
+        _report_progress(progress_callback, "render_page")
         page = render_page(pdf_path, page_index, dpi=dpi)
+        _report_progress(progress_callback, "page_rendered", page_index + 1, len(page_indexes))
+        _report_progress(progress_callback, "detect_layout")
         layout = detector.detect(page)
-        cells = _collect_cells(detector, page, layout, ocr)
+        _report_progress(progress_callback, "layout_detected", page_index + 1, len(page_indexes))
+        _report_progress(progress_callback, "collect_cells")
+        cells = _collect_cells(
+            detector, page, layout, ocr, progress_callback=progress_callback
+        )
         layout.cells = cells
         result.layouts.append(layout)
+        _report_progress(progress_callback, "cells_collected", len(cells), len(cells))
 
-        for cell in cells:
+        for cell_index, cell in enumerate(cells, start=1):
             observation, region = _read_cell(page, cell, ocr, debug_dir)
             result.regions.append(region)
             if observation is not None:
                 result.observations.append(observation)
+            _report_progress(progress_callback, "read_cell", cell_index, len(cells))
 
         if debug_dir is not None:
             _write_debug_artifacts(debug_dir, page, layout)
@@ -201,6 +228,7 @@ def extract_raster(
     }
     if debug_dir is not None:
         _write_json(debug_dir / "result.json", _result_summary(result))
+    _report_progress(progress_callback, "raster_complete")
     return result
 
 
@@ -212,15 +240,25 @@ def _collect_cells(
     page: RenderedPage,
     layout: PageLayout,
     ocr: TesseractOcr,
+    *,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> list[FieldCell]:
     """Chiede al layout detector le celle utili di ogni macroregione."""
+
+    probe_count = 0
 
     def read_player_number(image: np.ndarray) -> tuple[str, float]:
         # `TesseractOcr` memoizza internamente sul contenuto del ritaglio: le
         # finestre candidate della formazione si sovrappongono e le celle scelte
         # vengono rilette a valle, quindi senza cache la stessa cella pagherebbe
         # più volte l'avvio di Tesseract.
+        nonlocal probe_count
         res = ocr.read(image, ExpectedType.PLAYER_NUMBER)
+        probe_count += 1
+        # These probes are genuine Tesseract calls used by the layout detector
+        # to find a formation row/window; they are often the slowest part of a
+        # scanned report, even though the final cell count is not known yet.
+        _report_progress(progress_callback, "probe_cell", probe_count, None)
         return res.text, res.confidence
 
     cells: list[FieldCell] = []

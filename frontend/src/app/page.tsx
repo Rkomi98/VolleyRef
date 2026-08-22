@@ -9,7 +9,7 @@ import { IconButton } from "@/components/ui/icon-button"
 import { ProgressStep } from "@/components/ui/progress-step"
 import { useToast } from "@/components/ui/toast"
 import { AnalysisApiError } from "@/lib/api/errors"
-import type { ProcessingStepId, ProcessingStepStatus } from "@/lib/types"
+import type { AnalysisStatus, ProcessingStepId, ProcessingStepStatus } from "@/lib/types"
 import { analysisService } from "@/services"
 import { pollUntilDone } from "@/components/match/polling"
 import { rememberUploadedFile } from "@/components/match/uploadedFileCache"
@@ -43,6 +43,32 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+function getCurrentStepId(
+  currentStep: ProcessingStepId | null,
+  stepStatuses: Record<ProcessingStepId, ProcessingStepStatus>
+): ProcessingStepId | null {
+  return currentStep ?? PROCESS_STEP_ORDER.find((id) => stepStatuses[id] === "PROCESSING") ?? null
+}
+
+function getProgressOverview(
+  progress: number,
+  currentStep: ProcessingStepId | null,
+  stepStatuses: Record<ProcessingStepId, ProcessingStepStatus>
+) {
+  const safeProgress = Math.max(0, Math.min(100, Math.round(progress)))
+  const activeStepId = getCurrentStepId(currentStep, stepStatuses)
+  const activeStepIndex = activeStepId ? PROCESS_STEP_ORDER.indexOf(activeStepId) : -1
+  const completedStepCount = PROCESS_STEP_ORDER.filter((id) => stepStatuses[id] === "COMPLETED").length
+
+  return {
+    safeProgress,
+    activeStepId,
+    activeStepLabel: activeStepId ? STEP_LABELS[activeStepId] : "Preparazione dell'analisi",
+    activeStepNumber: activeStepIndex >= 0 ? activeStepIndex + 1 : Math.min(completedStepCount + 1, PROCESS_STEP_ORDER.length),
+    completedStepCount,
+  }
+}
+
 const DEMO_ANALYSIS_ID = "sanmarco-vicenza"
 const isMockMode = process.env.NEXT_PUBLIC_USE_MOCK_API !== "false"
 
@@ -58,6 +84,8 @@ export default function Home() {
   const [stepStatuses, setStepStatuses] = React.useState<Record<ProcessingStepId, ProcessingStepStatus>>(
     () => Object.fromEntries(PROCESS_STEP_ORDER.map((id) => [id, "PENDING"])) as Record<ProcessingStepId, ProcessingStepStatus>
   )
+  const [analysisProgress, setAnalysisProgress] = React.useState(0)
+  const [currentStep, setCurrentStep] = React.useState<ProcessingStepId | null>(null)
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null)
   const inputRef = React.useRef<HTMLInputElement>(null)
 
@@ -74,13 +102,17 @@ export default function Home() {
     setPhase("processing")
     setErrorMessage(null)
     setStepStatuses(Object.fromEntries(PROCESS_STEP_ORDER.map((id) => [id, "PENDING"])) as Record<ProcessingStepId, ProcessingStepStatus>)
+    setAnalysisProgress(0)
+    setCurrentStep(null)
     try {
       const { analysisId } = await analysisService.create(targetFile)
       rememberUploadedFile(analysisId, targetFile)
-      const status = await pollUntilDone(analysisId, (s) => {
+      const status = await pollUntilDone(analysisId, (s: AnalysisStatus) => {
         const next = Object.fromEntries(PROCESS_STEP_ORDER.map((id) => [id, "PENDING"])) as Record<ProcessingStepId, ProcessingStepStatus>
         for (const step of s.steps) next[step.id] = step.status
         setStepStatuses(next)
+        setAnalysisProgress(s.progress)
+        setCurrentStep(s.currentStep)
       })
       if (status.status === "READY") {
         router.push(`/match/${analysisId}`)
@@ -114,6 +146,8 @@ export default function Home() {
   const handleDemo = () => {
     router.push(`/match/${DEMO_ANALYSIS_ID}`)
   }
+
+  const progressOverview = getProgressOverview(analysisProgress, currentStep, stepStatuses)
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--color-background)", display: "flex", flexDirection: "column" }}>
@@ -153,19 +187,62 @@ export default function Home() {
       </header>
 
       {phase === "processing" || phase === "error" ? (
-        <main style={{ maxWidth: 480, margin: "64px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 28, width: "100%" }}>
+        <main style={{ maxWidth: 520, margin: "64px auto", padding: "0 24px", display: "flex", flexDirection: "column", gap: 28, width: "100%" }}>
           <div style={{ textAlign: "center" }}>
             <div style={{ fontFamily: "var(--font-display)", fontWeight: 600, fontSize: 22, color: "var(--color-text-primary)" }}>
               Analisi del referto in corso
             </div>
             <div style={{ fontSize: 14, color: "var(--color-text-secondary)", marginTop: 6 }}>Non chiudere questa pagina.</div>
           </div>
-          <div style={{ background: "var(--color-white)", border: "1px solid var(--border-default)", borderRadius: "var(--radius-lg)", padding: "24px 28px" }}>
+          <div style={{ background: "var(--color-white)", border: "1px solid var(--border-default)", borderRadius: "var(--radius-lg)", padding: "24px 28px", boxShadow: "var(--shadow-xs)" }}>
+            <section aria-labelledby="analysis-progress-heading" style={{ paddingBottom: 24, borderBottom: "1px solid var(--border-default)", marginBottom: 24 }}>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16 }}>
+                <div>
+                  <div id="analysis-progress-heading" style={{ fontSize: "var(--text-sm)", fontWeight: "var(--weight-semibold)", color: "var(--color-text-secondary)" }}>
+                    Completamento analisi
+                  </div>
+                  <div style={{ fontFamily: "var(--font-display)", fontSize: "var(--text-5xl)", fontWeight: "var(--weight-bold)", letterSpacing: "var(--tracking-tight)", color: "var(--color-text-primary)", lineHeight: 1.05, marginTop: 4 }}>
+                    {progressOverview.safeProgress}%
+                  </div>
+                </div>
+                <div style={{ fontSize: "var(--text-sm)", color: "var(--color-text-secondary)", fontWeight: "var(--weight-semibold)", textAlign: "right", whiteSpace: "nowrap" }}>
+                  Fase {progressOverview.activeStepNumber} di {PROCESS_STEP_ORDER.length}
+                </div>
+              </div>
+              <div
+                role="progressbar"
+                aria-label="Avanzamento dell'analisi del referto"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progressOverview.safeProgress}
+                aria-valuetext={`${progressOverview.safeProgress}% completato. ${progressOverview.activeStepLabel}. Fase ${progressOverview.activeStepNumber} di ${PROCESS_STEP_ORDER.length}.`}
+                style={{ height: 10, background: "var(--neutral-150)", borderRadius: "var(--radius-full)", overflow: "hidden", marginTop: 16 }}
+              >
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${progressOverview.safeProgress}%`,
+                    background: "var(--color-primary)",
+                    borderRadius: "inherit",
+                    transition: "width var(--duration-slow) var(--ease-standard)",
+                  }}
+                />
+              </div>
+              <div aria-live="polite" style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 3 }}>
+                <div style={{ fontSize: "var(--text-md)", color: "var(--color-text-primary)", fontWeight: "var(--weight-semibold)" }}>
+                  {progressOverview.activeStepLabel}
+                </div>
+                <div style={{ fontSize: "var(--text-sm)", color: "var(--color-text-secondary)" }}>
+                  {progressOverview.completedStepCount} di {PROCESS_STEP_ORDER.length} passaggi completati
+                </div>
+              </div>
+            </section>
             {PROCESS_STEP_ORDER.map((id, i) => (
               <ProgressStep
                 key={id}
                 label={STEP_LABELS[id]}
                 status={toProgressStepStatus(stepStatuses[id])}
+                description={id === progressOverview.activeStepId ? "In elaborazione" : undefined}
                 isLast={i === PROCESS_STEP_ORDER.length - 1}
               />
             ))}
